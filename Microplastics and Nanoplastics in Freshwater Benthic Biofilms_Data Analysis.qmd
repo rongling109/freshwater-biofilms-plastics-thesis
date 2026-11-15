@@ -1,0 +1,3402 @@
+---
+title: "Microplastics and Nanoplastics in Freshwater Benthic Biofilms: Data Analysis"
+author: "Rongling LIU"
+format: html
+editor: visual
+---
+
+## 1. Setup
+
+```{r}
+#| label: setup
+
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(sf)
+library(rnaturalearthdata)
+library(patchwork)
+library(metafor)
+
+# Use the thesis project's output folder for all figures and model summaries.
+dir.create("outputs", showWarnings = FALSE)
+```
+
+## 2. Data Import
+
+```{r}
+#| label: data-import
+# Read study information, experimental arm information and treatment-control response records.
+file_path <- "../03_Extraction_Data/data table - thesis.xlsx"
+
+
+file.exists(file_path)
+
+
+excel_sheets(file_path)
+
+# Keep the three worksheets at their study, experimental-arm and response-comparison levels.
+study_info <- read_excel(file_path, sheet = "Study_information")
+experiment_info <- read_excel(file_path, sheet = "Experiment_information")
+effect_size_data <- read_excel(file_path, sheet = "Effect_size_data")
+
+
+dim(study_info)
+dim(experiment_info)
+dim(effect_size_data)
+```
+
+## 3. Descriptive Analysis
+
+### Figure 1 — Study selection process
+
+This R code covers only the data analyses and related figure and table outputs, so it does not include the study selection flowchart (Figure 1). To make the outputs easy to match to the thesis and avoid confusion, figure numbering follows the thesis, starting from Figure 2.
+
+### Figure 2 — Geographical and temporal distribution of studies
+
+```{r}
+#| label: figure2-distribution-data
+
+# 1. Prepare study-level data --------------------------------------------------
+names(study_info) <- trimws(names(study_info))
+
+study_data <- study_info |>
+  transmute(
+    Study_ID = trimws(as.character(`Study ID`)),
+    Year = as.numeric(Year),
+    Location = trimws(`Experiment location`),
+    Longitude = as.numeric(Longitude),
+    Latitude = as.numeric(Latitude),
+    Ecosystem = na_if(trimws(Ecosystem), ""),
+    Setting = na_if(trimws(Setting), ""),
+    Scale = na_if(trimws(`Experimental Scale`), "")
+  ) |>
+  distinct()
+
+# Remove identical study records. Stop counting if information conflicts within Study_ID.
+
+if (anyNA(study_data$Study_ID) ||
+    any(study_data$Study_ID == "") ||
+    anyDuplicated(study_data$Study_ID) > 0L) {
+  stop("Study ID is missing or has conflicting information. Check study_data.")
+}
+
+# Check years and coordinates so records with missing values are not silently omitted from plots.
+data_issues <- study_data |>
+  filter(
+    !is.finite(Year) | Year != floor(Year) |
+    !is.finite(Longitude) | !is.finite(Latitude) |
+    abs(Longitude) > 180 | abs(Latitude) > 90
+  )
+
+if (nrow(data_issues) > 0L) {
+  print(data_issues)
+  stop("The years or coordinates in the records above need manual review.")
+}
+
+
+# 2. Count independent studies by publication year --------------------------------------
+# Each row of study_data is a unique Study ID, so each study is counted once.
+year_counts <- study_data |>
+  count(Year, name = "Number_of_studies")
+
+# Include every year from the earliest to the latest publication year.
+# Set years with no studies to 0 so the line does not skip them.
+year_counts <- data.frame(
+  Year = seq(min(study_data$Year), max(study_data$Year))
+) |>
+  left_join(year_counts, by = "Year") |>
+  mutate(
+    Number_of_studies = coalesce(Number_of_studies, 0L)
+  )
+
+# Print annual study counts.
+print(year_counts)
+
+
+# 3. Count studies at each coordinate ---------------------------------------------
+# Combine records only when longitude and latitude are identical. Do not combine nearby locations with different coordinates.
+# Count unique Study IDs. This summary is used only for the map and does not change study_data.
+location_counts <- study_data |>
+  group_by(Longitude, Latitude) |>
+  summarise(
+    Number_of_studies = n_distinct(Study_ID),
+    .groups = "drop"
+  )
+
+# Map symbols represent 1–5 studies per coordinate. Counts outside this range trigger a check.
+if (any(location_counts$Number_of_studies > 5L)) {
+  stop("A coordinate has more than 5 studies. Add the corresponding colour and shape.")
+}
+
+# Treat counts as categories so both colour and shape can represent them.
+location_counts <- location_counts |>
+  mutate(Study_count = factor(Number_of_studies, levels = 1:5))
+
+# Print the number of independent studies at each coordinate.
+print(location_counts)
+
+world_map <- rnaturalearthdata::countries50
+```
+
+```{r}
+#| label: fig-figure2a-geographical-distribution
+#| fig-width: 6.3
+#| fig-height: 3.8
+#| fig-align: center
+#| dpi: 300
+
+# 4. Geographical panel: study locations and study counts ---------------------------------
+# Draw one symbol per coordinate. Colour and shape both show the number of studies at that location.
+figure2a <- ggplot() +
+  geom_sf(
+    data = world_map,
+    fill = "#333333",
+    colour = "#606060",
+    linewidth = 0.10
+  ) +
+  geom_point(
+    data = location_counts,
+    aes(
+      x = Longitude,
+      y = Latitude,
+      colour = Study_count,
+      shape = Study_count
+    ),
+    size = 3.2,
+    stroke = 1
+  ) +
+  scale_colour_manual(
+    name = "Number of studies",
+    values = c(
+      "1" = "#FF8C85",  
+      "2" = "#2CA25F",  
+      "3" = "#9467BD",  
+      "4" = "#377EB8",  
+      "5" = "#E69F00"   
+    )
+  ) +
+  scale_shape_manual(
+  name = "Number of studies",
+  values = c(
+    "1" = "●",  
+    "2" = "▲",  
+    "3" = "■",  
+    "4" = "★",  
+    "5" = "◆"   
+  )
+  ) +
+  coord_sf(
+    crs = "+proj=robin",
+    default_crs = st_crs(4326),
+    datum = NA,
+    expand = FALSE
+  ) +
+  labs(title = "a  Geographical distribution") +
+  theme_void(base_size = 11, base_family = "sans") +
+  theme(
+    panel.background = element_rect(fill = "#ECECEC", colour = NA),
+    plot.background = element_rect(fill = "white", colour = NA),
+    plot.title = element_text(size = 12, face = "bold", hjust = 0.5,
+      margin = margin(b = 5)),
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.title = element_text(size = 11),
+    legend.text = element_text(size = 11),
+    legend.key.size = grid::unit(5, "mm"),
+    legend.spacing.x = grid::unit(2, "pt"),
+    legend.margin = margin(1, 0, 0, 0),
+    legend.box.margin = margin(0, 0, 0, 0),
+    plot.margin = margin(4, 4, 3, 4)
+  ) +
+  guides(colour = guide_legend(nrow = 1, title.position = "left",
+    override.aes = list(size = 4.2)))
+
+print(figure2a)
+```
+
+```{r}
+#| label: fig-figure2b-temporal-distribution
+#| fig-width: 6.3
+#| fig-height: 2.65
+#| fig-align: center
+#| dpi: 300
+
+# 5. Temporal panel: annual independent-study counts -----------------------------------
+# Show annual counts with points and lines, including years with zero studies.
+
+figure2b <- ggplot(
+  year_counts,
+  aes(x = Year, y = Number_of_studies, group = 1)
+) +
+  geom_line(colour = "#377F89", linewidth = 0.7) +
+  geom_point(colour = "#377F89", size = 2.5) +
+  scale_x_continuous(
+    breaks = year_counts$Year,
+    expand = expansion(mult = 0.03)
+  ) +
+  scale_y_continuous(
+    breaks = seq(0, max(year_counts$Number_of_studies), by = 1),
+    limits = c(0, NA),
+    expand = expansion(mult = c(0, 0.12))
+  ) +
+  labs(
+    title = "b  Temporal distribution",
+    x = "Year",
+    y = "Number of studies"
+  ) +
+  theme_classic(base_size = 11, base_family = "sans") +
+  theme(
+    plot.title = element_text(size = 12, face = "bold", hjust = 0.5,
+      margin = margin(b = 5)),
+    axis.title = element_text(size = 11),
+    axis.text = element_text(size = 11, colour = "#333333"),
+    plot.margin = margin(4, 6, 4, 4)
+  )
+
+
+print(figure2b)
+```
+
+```{r}
+#| label: figure2-distribution-export
+
+# 6. Export Figures 2a and 1b separately -------------------------------------
+# Both plots are 6.3 inches wide (about 16 cm). Set heights to suit the map and line plot separately.
+# The PDF keeps vector text and graphics; the PNG is 300 dpi.
+figure2_output_dir <- file.path(
+  "C:/Users/87236/Desktop/Final essay/Thesis data analysis", "outputs"
+)
+dir.create(figure2_output_dir, recursive = TRUE, showWarnings = FALSE)
+
+ggsave(
+  file.path(figure2_output_dir, "Figure2a_Geographical_distribution.pdf"),
+  plot = figure2a, width = 6.3, height = 3.8, units = "in",
+  device = grDevices::cairo_pdf, bg = "white"
+)
+ggsave(
+  file.path(figure2_output_dir, "Figure2a_Geographical_distribution.png"),
+  plot = figure2a, width = 6.3, height = 3.8, units = "in",
+  dpi = 300, bg = "white"
+)
+ggsave(
+  file.path(figure2_output_dir, "Figure2b_Temporal_distribution.pdf"),
+  plot = figure2b, width = 6.3, height = 2.65, units = "in",
+  device = grDevices::cairo_pdf, bg = "white"
+)
+ggsave(
+  file.path(figure2_output_dir, "Figure2b_Temporal_distribution.png"),
+  plot = figure2b, width = 6.3, height = 2.65, units = "in",
+  dpi = 300, bg = "white"
+)
+```
+
+### Figure 3 — Ecosystems and experimental settings
+
+```{r}
+#| label: fig-figure3
+#| fig-width: 7.2
+#| fig-height: 5.6
+#| fig-align: center
+#| dpi: 600
+
+# Prepare study-level categories for ecosystem, experimental setting and experimental scale.
+
+
+figure3_data <- study_info |>
+  transmute(
+    Study_ID = `Study ID`,
+    Ecosystem = Ecosystem,
+    Setting = Setting,
+    Scale = `Experimental Scale`
+  )
+
+# 1. Check ecosystem, setting and scale categories ----------------------------------
+classification_issues <- figure3_data |>
+  filter(
+    !(Ecosystem %in% c("Stream", "River", "Lake", "Wetland", "Other")) |
+    !(Setting %in% c("Lab", "Outdoor")) |
+    !(Scale %in% c("Microcosm", "Mesocosm"))
+  )
+
+# Print records with categories outside the expected values and stop plotting.
+if (nrow(classification_issues) > 0) {
+  print(classification_issues)
+  stop("Some categories have not been standardised. Re-import the latest Excel data.")
+}
+
+# 2. Summarise ecosystems and experimental scales ---------------------------------------------
+# The shared data have been checked for unique Study IDs, so each study is counted once.
+ecosystem_counts <- figure3_data |>
+  count(Ecosystem, Scale, name = "Number_of_studies") |>
+  mutate(
+    Scale = factor(Scale, levels = c("Microcosm", "Mesocosm"))
+  )
+
+# Calculate the total for each ecosystem to order the bars and label their ends.
+ecosystem_totals <- ecosystem_counts |>
+  group_by(Ecosystem) |>
+  summarise(
+    Number_of_studies = sum(Number_of_studies),
+    .groups = "drop"
+  ) |>
+  arrange(desc(Number_of_studies), Ecosystem)
+
+
+# 3. Summarise experimental settings -------------------------------------------------------
+# Use all included studies as the percentage denominator. Keep unrounded percentages for plotting.
+setting_counts <- figure3_data |>
+  count(Setting, name = "Number_of_studies") |>
+  mutate(
+    Setting = factor(Setting, levels = c("Lab", "Outdoor"))
+  ) |>
+  arrange(Setting) |>
+  mutate(
+    Percentage = 100 * Number_of_studies / sum(Number_of_studies),
+    xmax = 100 * cumsum(Number_of_studies) / sum(Number_of_studies),
+    xmin = xmax - Percentage,
+
+    # Labels show the name, count and percentage. Round percentages to one decimal place in labels only.
+    Label = sprintf(
+      "%s · %d (%.1f%%)",
+      Setting, Number_of_studies, Percentage
+    ),
+
+    # Place the Lab label on the left and the Outdoor label on the right to avoid crowding the smaller section.
+    Label_x = if_else(Setting == "Lab", 0, 100),
+    Label_hjust = if_else(Setting == "Lab", 0, 1)
+  )
+
+# Print ecosystem-by-scale counts and experimental-setting proportions.
+print(ecosystem_counts)
+print(setting_counts)
+
+
+# 4. Set shared titles and spacing for the two plots -----------------------------------------
+figure3_theme <- theme(
+  plot.title = element_text(size = 12, face = "bold", hjust = 0.5),
+  plot.background = element_rect(fill = "white", colour = NA),
+  plot.margin = margin(8, 12, 8, 10)
+)
+
+
+# 5. Figure 3a: ecosystems and experimental scales --------------------------------------
+# Use one horizontal stacked bar for each ecosystem.
+# Blue-green represents Microcosm and orange represents Mesocosm. Label each bar end with its total study count.
+figure3a <- ggplot(
+  ecosystem_counts,
+  aes(x = Number_of_studies, y = Ecosystem, fill = Scale)
+) +
+  geom_col(
+    width = 0.65,
+    position = position_stack(reverse = TRUE)
+  ) +
+  geom_text(
+    data = ecosystem_totals,
+    aes(
+      x = Number_of_studies,
+      y = Ecosystem,
+      label = Number_of_studies
+    ),
+    inherit.aes = FALSE,
+    hjust = -0.35,
+    size = 3.5
+  ) +
+  scale_y_discrete(
+    limits = rev(ecosystem_totals$Ecosystem)
+  ) +
+  scale_x_continuous(
+    breaks = seq(0, max(ecosystem_totals$Number_of_studies)),
+    expand = expansion(mult = c(0, 0.10))
+  ) +
+  scale_fill_manual(
+    name = "Experimental scale",
+    values = c(
+      "Microcosm" = "#377F89",
+      "Mesocosm" = "#EBA05A"
+    )
+  ) +
+  labs(
+    title = "a  Ecosystem types and experimental scale",
+    x = "Number of studies",
+    y = "Ecosystem type"
+  ) +
+  theme_classic(base_size = 11) +
+  figure3_theme +
+  theme(
+    panel.grid.major.x = element_line(colour = "#E9E9E9", linewidth = 0.3),
+    legend.position = "bottom",
+    legend.title = element_text(size = 10),
+    legend.text = element_text(size = 10)
+  )
+
+
+# 6. Figure 3b: percentage bar for experimental settings ------------------------------------
+
+# Place labels above the percentage bar so low-frequency categories remain readable.
+figure3b <- ggplot(setting_counts) +
+  geom_rect(
+    aes(xmin = xmin, xmax = xmax, fill = Setting),
+    ymin = 0,
+    ymax = 0.28
+  ) +
+  geom_text(
+    aes(
+      x = Label_x,
+      label = Label,
+      hjust = Label_hjust
+    ),
+    y = 0.50,
+    size = 3.5
+  ) +
+  scale_fill_manual(
+    values = c(
+      "Lab" = "#377F89",
+      "Outdoor" = "#EBA05A"
+    )
+  ) +
+  scale_x_continuous(
+    limits = c(0, 100),
+    breaks = c(0, 100),
+    labels = c("0%", "100%"),
+    expand = c(0, 0)
+  ) +
+  scale_y_continuous(
+    limits = c(-0.12, 0.75),
+    expand = c(0, 0)
+  ) +
+  labs(title = "b  Experimental settings") +
+  theme_void(base_size = 11) +
+  figure3_theme +
+  theme(
+    axis.text.x = element_text(size = 10, colour = "#555555"),
+    legend.position = "none"
+  )
+
+
+# 7. Stack the plots vertically and save -----------------------------------------------------
+figure3 <- wrap_plots(
+  figure3a,
+  figure3b,
+  ncol = 1,
+  heights = c(3, 1)
+)
+
+print(figure3)
+
+# Export a vector PDF and a PNG with dimensions matching the code chunk settings.
+ggsave(
+  "outputs/Figure3_Ecosystems_experimental_settings.pdf", plot = figure3,
+  width = 7.2, height = 5.6, units = "in", bg = "white"
+)
+
+ggsave(
+  "outputs/Figure3_Ecosystems_experimental_settings.png", plot = figure3,
+  width = 7.2, height = 5.6, units = "in",
+  dpi = 600, bg = "white"
+)
+```
+
+### Figure 4 — Polymer type, particle size and particle shape
+
+```{r}
+#| label: fig-figure4-layout
+#| fig-width: 12
+#| fig-height: 3.5
+#| out-width: 100%
+#| fig-align: center
+#| dpi: 600
+
+# Figure 4: polymer type, particle size and particle shape -------------------------------------
+# Use the experimental-arm table experiment_info as input.
+
+
+
+
+# 1. Select plastic-exposure treatment arms -------------------------------------------------
+# Use both Arm_ID and Polymer_design:
+# Exclude controls and arms exposed only to a co-contaminant without plastic.
+# Prepare plastic treatment arms in plastic_data and keep the original fields.
+plastic_data <- experiment_info |>
+  mutate(
+    across(
+      c(Study_ID, Arm_ID, Polymer_design),
+      ~ trimws(as.character(.x))
+    )
+  ) |>
+  filter(
+    Study_ID %in% study_data$Study_ID,
+    grepl("_T[0-9]+$", Arm_ID),
+    Polymer_design == "Single"
+  )
+
+
+# 2. Standardise polymer types and shapes ---------------------------------------------
+# Standardise polymer names in a separate column and retain original names for traceability.
+# Combine shape synonyms using the explicit mappings below.
+plastic_data <- plastic_data |>
+  mutate(
+    polymer_key = toupper(trimws(as.character(Polymer_type))),
+    shape_key = tolower(trimws(as.character(Polymer_shape))),
+
+    Polymer_type_clean = case_when(
+      polymer_key %in% c("PS", "PE", "PP", "PVC", "PET", "PLA", "TWP") ~
+        polymer_key,
+      polymer_key == "AF RESIN" ~ "AF resin",
+      polymer_key == "OTHER" ~ "Other",
+      is.na(polymer_key) | polymer_key %in% c("", "NA", "NR", "NONE") ~
+        "Not reported",
+      TRUE ~ NA_character_
+    ),
+
+    Polymer_shape_clean = case_when(
+      shape_key %in% c("microsphere", "microbead", "sphere") ~ "Sphere/bead",
+      shape_key %in% c("irregular", "irregular particle") ~ "Irregular",
+      shape_key == "microfiber" ~ "Fiber",
+      shape_key == "fragment" ~ "Fragment",
+      shape_key == "granule" ~ "Granule",
+      shape_key == "raspberry-like" ~
+        "Raspberry-like",
+      shape_key == "particle" ~
+        "Particle",
+      is.na(shape_key) | shape_key %in% c("", "na", "nr", "none") ~
+        "Not reported",
+      TRUE ~ NA_character_
+    )
+  )
+
+
+# 3. Classify particle sizes into intervals (μm) --------------------------------------------
+# Use Particle_size_μm. Its units are already harmonised, so no further conversion from nm or mm is needed.
+# Classify single values directly. Use the mapping table for ranges, not their midpoints.
+# Classify ranges spanning several intervals as Other.
+size_levels <- c(
+  "<1", "1-<100", "100-<200", "200-<500",
+  "500-<1000", "1000-5000", "Other", "Not reported"
+)
+
+size_range_map <- c(
+  "0.05-0.10" = "<1",
+  "<=0.1" = "<1",
+  "10-45" = "1-<100",
+  "8-20" = "1-<100",
+  "1-4" = "1-<100",
+  "63-75" = "1-<100",
+  "1-5" = "1-<100",
+  "62-149" = "Other",
+  ">0.1-5000" = "Other"
+)
+
+plastic_data <- plastic_data |>
+  mutate(
+    # Standardise range symbols and remove spaces for matching.
+    Size_text = gsub(
+      "[[:space:]]+", "", as.character(`Particle_size_μm`)
+    ),
+    Size_text = gsub("[–—−]", "-", Size_text),
+    Size_text = sub("^≤", "<=", Size_text),
+
+    # Convert only single values to numeric. Handle ranges with the mapping table.
+    Size_value = as.numeric(
+      if_else(
+        grepl("^[0-9]+(\\.[0-9]+)?$", Size_text),
+        Size_text,
+        NA_character_
+      )
+    ),
+
+    Particle_size_clean = case_when(
+      is.na(Size_text) | toupper(Size_text) %in% c("", "NA", "NR", "NONE") ~
+        "Not reported",
+
+      Size_text %in% names(size_range_map) ~
+        unname(size_range_map[Size_text]),
+
+      Size_value > 0 & Size_value <= 5000 ~
+        as.character(cut(
+          Size_value,
+          breaks = c(0, 1, 100, 200, 500, 1000, Inf),
+          labels = size_levels[1:6],
+          right = FALSE
+        )),
+
+      TRUE ~ NA_character_
+    ),
+
+    Particle_size_clean = factor(
+      Particle_size_clean,
+      levels = size_levels
+    )
+  )
+
+# List unmatched particle sizes as issues and stop further classification and counting.
+unmatched <- plastic_data |>
+  filter(
+    is.na(Polymer_type_clean) |
+    is.na(Polymer_shape_clean) |
+    is.na(Particle_size_clean)
+  ) |>
+  distinct(Study_ID, Polymer_type, Polymer_shape, `Particle_size_μm`)
+
+if (nrow(unmatched) > 0L) {
+  print(unmatched, n = Inf)
+  stop("Some categories or particle sizes are not recognised. Check the table above and confirm that the latest Excel data have been imported.")
+}
+
+
+# 4. Remove duplicates and count study-category combinations separately --------------------------------
+# Different concentrations, exposure times and experimental groups in one study do not increase its count within the same category.
+# A study covering several categories can be counted once in each category.
+polymer_counts <- plastic_data |>
+  distinct(Study_ID, Polymer_type_clean) |>
+  count(Polymer_type_clean, name = "Number_of_studies", sort = TRUE)
+
+size_counts <- plastic_data |>
+  distinct(Study_ID, Particle_size_clean) |>
+  count(Particle_size_clean, name = "Number_of_studies")
+
+shape_counts <- plastic_data |>
+  distinct(Study_ID, Polymer_shape_clean) |>
+  count(Polymer_shape_clean, name = "Number_of_studies", sort = TRUE)
+
+# Print polymer and shape mappings, particle-size categories and study counts.
+polymer_mapping <- plastic_data |>
+  distinct(Polymer_type, Polymer_type_clean) |>
+  arrange(Polymer_type_clean)
+
+size_mapping <- plastic_data |>
+  distinct(`Particle_size_μm`, Particle_size_clean) |>
+  arrange(Particle_size_clean)
+
+print(polymer_mapping, n = Inf)
+print(size_mapping, n = Inf)
+print(polymer_counts, n = Inf)
+print(size_counts, n = Inf)
+print(shape_counts, n = Inf)
+
+
+# 5. Set colours -----------------------------------------------------------
+# The three pie charts use study-category counts for polymer type, particle size and shape, respectively.
+
+pie_palette <- c(
+  "#A6CEE3", "#1F78B4", "#B2DF8A", "#33A02C",
+  "#FB9A99", "#E31A1C", "#FDBF6F", "#FF7F00",
+  "#CAB2D6", "#6A3D9A"
+)
+
+
+# 6. Create a pie chart on the left and a legend on the right -----------------------------------------
+# Use the same space proportions for all three panels so the pies have the same size.
+# Place category titles above the legends and a/b/c separately at the upper left of each pie.
+make_pie_panel <- function(count_data, category, legend_title, tag) {
+
+  plot_data <- count_data |>
+    transmute(
+      Category = as.character(.data[[category]]),
+      Number_of_studies
+    )
+
+  plot_data$Category <- factor(
+    plot_data$Category,
+    levels = plot_data$Category
+  )
+
+  fill_colours <- setNames(
+    pie_palette[seq_len(nrow(plot_data))],
+    levels(plot_data$Category)
+  )
+  fill_colours[names(fill_colours) == "Other"] <- "#BDBDBD"
+  fill_colours[names(fill_colours) == "Not reported"] <- "#E5E5E5"
+
+  pie <- ggplot(
+    plot_data,
+    aes(x = "", y = Number_of_studies, fill = Category)
+  ) +
+    geom_col(
+      width = 1,
+      colour = "#222222",
+      linewidth = 0.3,
+      position = position_stack(reverse = TRUE)
+    ) +
+    coord_polar(theta = "y") +
+    scale_y_continuous(expand = c(0, 0)) +
+    scale_fill_manual(
+      name = legend_title,
+      values = fill_colours,
+      breaks = levels(plot_data$Category),
+      labels = scales::label_wrap(18)
+    ) +
+    labs(tag = tag) +
+    guides(fill = guide_legend(ncol = 1)) +
+    theme_void(base_size = 12) +
+    theme(
+      plot.tag = element_text(size = 16, face = "bold"),
+      plot.tag.position = c(0.04, 0.98),
+      plot.margin = margin(8, 0, 8, 4),
+      legend.position = "right",
+      legend.direction = "vertical",
+      legend.title = element_text(size = 12, face = "bold"),
+      legend.text = element_text(size = 11),
+      legend.key.size = grid::unit(3.5, "mm"),
+      legend.margin = margin(0, 0, 0, 0),
+      legend.box.margin = margin(0, 0, 0, 0)
+    )
+
+  # Place the legend in a separate area on the right so it does not reduce the pie's space.
+  wrap_plots(
+    pie,
+    guide_area(),
+    nrow = 1,
+    widths = c(1.3, 1),
+    guides = "collect"
+  )
+}
+
+figure4a <- make_pie_panel(
+  polymer_counts, "Polymer_type_clean", "Polymer type", "a"
+)
+
+figure4b <- make_pie_panel(
+  size_counts, "Particle_size_clean", "Particle size (µm)", "b"
+)
+
+figure4c <- make_pie_panel(
+  shape_counts, "Polymer_shape_clean", "Particle shape", "c"
+)
+
+
+# 7. Arrange panels horizontally and save -----------------------------------------------------
+# Wrap each panel separately to retain its internal pie-and-legend layout.
+figure4 <- wrap_plots(
+  wrap_elements(full = figure4a),
+  wrap_elements(full = figure4b),
+  wrap_elements(full = figure4c),
+  nrow = 1,
+  widths = c(1, 1, 1)
+) +
+  plot_annotation(
+    caption = paste(
+      "Counts represent unique study-category combinations;",
+      "a study may contribute to multiple categories."
+    ),
+    theme = theme(
+      plot.caption = element_text(size = 10, hjust = 0),
+      plot.background = element_rect(fill = "white", colour = NA),
+      plot.margin = margin(4, 6, 4, 6)
+    )
+  )
+
+print(figure4)
+
+# Export the three horizontally arranged pie charts and their legends.
+ggsave(
+  "outputs/Figure4_Plastic_characteristics.pdf", plot = figure4,
+  width = 12, height = 3.5, units = "in", bg = "white"
+)
+
+ggsave(
+  "outputs/Figure4_Plastic_characteristics.png", plot = figure4,
+  width = 12, height = 3.5, units = "in",
+  dpi = 600, bg = "white"
+)
+```
+
+### Figure 5 — Exposure concentration and duration
+
+```{r}
+#| label: figure5-refresh-data
+# Read arm-level exposure information from Experiment_information.
+# The dual-axis scatter plot uses harmonised units and deduplicated exposure conditions.
+
+library(dplyr)
+library(ggplot2)
+experiment_info <- readxl::read_excel(
+  "../03_Extraction_Data/data table - thesis.xlsx",
+  sheet = "Experiment_information", range = readxl::cell_cols("A:Q")
+)
+```
+
+```{r}
+#| label: figure5-exposure-conditions
+# Figure 5: explore exposure concentration × exposure duration -------------------------------
+# Prepare concentration, units, duration and exclusion reasons in a separate data object.
+
+
+
+# 1. Standardise units and record exclusion reasons -----------------------------------------
+exposure_data <- experiment_info |>
+  mutate(
+    across(
+      c(Study_ID, Experiment_ID, Polymer_design),
+      ~ trimws(as.character(.x))
+    ),
+
+    # Convert values that cannot be parsed to NA and include them in the review table below.
+    Concentration_numeric = suppressWarnings(
+      as.numeric(as.character(Concentration_value))
+    ),
+    Duration_days = suppressWarnings(
+      as.numeric(as.character(Duration_Day))
+    ),
+
+    # Replace both microgram symbols with u and remove spaces from units.
+    Unit_clean = tolower(gsub(
+      "[[:space:]]+", "",
+      chartr("µμ", "uu", as.character(Concentration_unit))
+    )),
+
+    Concentration_type = case_when(
+      Unit_clean %in% c("mg/l", "ug/l", "ug/ml") ~ "Mass",
+      Unit_clean %in% c("particles/l", "particles/ml", "fibers/l") ~ "Count",
+      TRUE ~ NA_character_
+    ),
+
+    # Convert mass concentrations to mg/L and number concentrations to particles/L.
+    # 1 µg/mL = 1 mg/L. Keep fibers/L values unchanged and record their source separately.
+    Concentration_std = case_when(
+      Unit_clean == "ug/l" ~ Concentration_numeric / 1000,
+      Unit_clean == "particles/ml" ~ Concentration_numeric * 1000,
+      Unit_clean %in% c("mg/l", "ug/ml", "particles/l", "fibers/l") ~
+        Concentration_numeric,
+      TRUE ~ NA_real_
+    ),
+
+    # Record the first exclusion reason for each row.
+    # Select plastic exposures with Polymer_design = Single.
+    Exclusion_reason = case_when(
+      grepl("silica", Unit_clean, fixed = TRUE) ~ "Non-plastic particles: silica",
+      !is.finite(Concentration_numeric) ~ "Concentration is missing or cannot be parsed",
+      Concentration_numeric == 0 ~ "Concentration is 0",
+      Concentration_numeric < 0 ~ "Negative concentration",
+      is.na(Polymer_design) | Polymer_design != "Single" ~
+        "Not marked as plastic exposure",
+      is.na(Concentration_type) ~ "Concentration unit is not supported for conversion",
+      !is.finite(Concentration_std) ~ "Standardised concentration is not finite",
+      !is.finite(Duration_days) | Duration_days <= 0 ~
+        "Exposure duration is missing, cannot be parsed or is not positive",
+      is.na(Study_ID) | Study_ID == "" |
+        is.na(Experiment_ID) | Experiment_ID == "" ~
+        "Missing study or experiment ID",
+      TRUE ~ NA_character_
+    )
+  )
+
+# Retain original concentrations, units and durations so excluded records can be checked.
+excluded_records <- exposure_data |>
+  filter(!is.na(Exclusion_reason)) |>
+  select(
+    Study_ID, Experiment_ID, Arm_ID,
+    Concentration_value, Concentration_unit, Duration_Day,
+    Exclusion_reason
+  ) |>
+  distinct()
+
+
+# 2. Remove duplicate exposure conditions -----------------------------------------------------
+# Keep different concentration levels and durations.
+# Identify exposure conditions by study, experiment, concentration type, standardised concentration and duration.
+# Differences in polymer, particle size or co-exposure under the same key do not count as separate exposure conditions.
+
+exposure_conditions <- exposure_data |>
+  filter(is.na(Exclusion_reason)) |>
+  group_by(
+    Concentration_type, Study_ID, Experiment_ID,
+    Concentration_std, Duration_days
+  ) |>
+  summarise(
+    Source_units = paste(
+      sort(unique(as.character(Concentration_unit))),
+      collapse = "; "
+    ),
+    Includes_fibers = any(Unit_clean == "fibers/l"),
+    .groups = "drop"
+  ) |>
+  mutate(
+    Standard_unit = if_else(
+      Concentration_type == "Mass", "mg/L", "particles/L"
+    ),
+
+    # Keep fractional days, such as 0.125 day. Do not round duration to whole days.
+    Duration_bin = cut(
+      Duration_days,
+      breaks = c(0, 7, 14, 30, 60, Inf),
+      labels = c("≤7", ">7–14", ">14–30", ">30–60", ">60"),
+      right = TRUE
+    )
+  )
+
+
+# Separate concentration measurement types to set the two axis ranges. Do not convert between units.
+mass_conditions <- exposure_conditions |> filter(Concentration_type == "Mass")
+count_conditions <- exposure_conditions |> filter(Concentration_type == "Count")
+print(excluded_records)
+```
+
+```{r}
+#| label: figure5-scatter
+#| fig-width: 6.3
+#| fig-height: 5.5
+
+# 1. Prepare individual exposure conditions for the scatter plot --------------------------------------
+# Each row is one defined Study_ID + Experiment_ID + concentration type + concentration + duration combination.
+# Keep Source_units and Includes_fibers. Show the two concentration types in their respective original units.
+print(
+  exposure_conditions |>
+    group_by(Concentration_type) |>
+    summarise(Exposure_conditions = n(), Studies = n_distinct(Study_ID), .groups = "drop")
+)
+
+# 2. Set a mapping in log10 space for display only --------------------------------
+# Round each type's range outward to whole powers of ten. Keep an axis span of at least one order of magnitude.
+figure5_log_limits <- function(x) {
+  log_range <- range(log10(x))
+  lower <- floor(log_range[1])
+  c(lower, max(lower + 1, ceiling(log_range[2])))
+}
+figure5_mass_log_range <- figure5_log_limits(mass_conditions$Concentration_std)
+figure5_count_log_range <- figure5_log_limits(count_conditions$Concentration_std)
+
+# Use mg/L directly for mass concentration. The plot coordinate for number concentration N follows:
+# log10(Plot_y) = a * log10(N) + b.
+# a and b align the endpoints of the two log10 axes; they are not unit-conversion factors. Equal heights do not mean equal concentrations.
+figure5_axis_a <- diff(figure5_mass_log_range) / diff(figure5_count_log_range)
+figure5_axis_b <- figure5_mass_log_range[1] - figure5_axis_a * figure5_count_log_range[1]
+
+figure5_scatter_data <- exposure_conditions |>
+  mutate(
+    Plot_y = if_else(
+      Concentration_type == "Mass", Concentration_std,
+      10^(figure5_axis_a * log10(Concentration_std) + figure5_axis_b)
+    )
+  )
+
+cat("For plotting only: log10(Plot_y) = ", figure5_axis_a,
+    " × log10(particles/L) + ", figure5_axis_b, "\n", sep = "")
+
+# Show actual concentrations as powers of ten. Each axis retains its own original concentration unit.
+figure5_log_labels <- function(x) parse(text = paste0("10^", round(log10(x))))
+
+# 3. Single dual-axis scatter plot: horizontal jitter only, with a fixed seed for reproducibility -------------------
+figure5_scatter <- ggplot(
+  figure5_scatter_data,
+  aes(Duration_bin, Plot_y, colour = Concentration_type, shape = Concentration_type)
+) +
+  geom_point(
+    size = 2.7, alpha = 0.60,
+    position = position_jitter(width = 0.16, height = 0, seed = 701)
+  ) +
+  scale_colour_manual(
+    name = NULL, values = c(Mass = "#2B7BBA", Count = "#D97925"),
+    breaks = c("Mass", "Count"), labels = c("Mass concentration", "Number concentration")
+  ) +
+  scale_shape_manual(
+    name = NULL, values = c(Mass = 16, Count = 17),
+    breaks = c("Mass", "Count"), labels = c("Mass concentration", "Number concentration")
+  ) +
+  scale_x_discrete(drop = FALSE) +
+  scale_y_log10(
+    name = "Mass concentration (mg/L)",
+    limits = 10^figure5_mass_log_range,
+    breaks = 10^seq(figure5_mass_log_range[1], figure5_mass_log_range[2]),
+    labels = figure5_log_labels, minor_breaks = NULL,
+    expand = expansion(mult = c(0.04, 0.04)),
+    # The right axis uses a strictly monotonic inverse transformation to recover N: N = 10^((log10(Plot_y) - b) / a).
+    # Orange points use the mapped plot coordinates. The original number-concentration unit remains particles/L.
+    sec.axis = sec_axis(
+      transform = ~ 10^((log10(.) - figure5_axis_b) / figure5_axis_a),
+      name = "Number concentration (particles/L)",
+      breaks = 10^seq(figure5_count_log_range[1], figure5_count_log_range[2]),
+      labels = figure5_log_labels
+    )
+  ) +
+  labs(
+    x = "Exposure duration (days)",
+    caption = "Dual axes are aligned for display; the units are not interconvertible."
+  ) +
+  guides(colour = guide_legend(override.aes = list(alpha = 1, size = 3))) +
+  theme_classic(base_size = 11, base_family = "sans") +
+  theme(
+    axis.text.x = element_text(size = 10.5),
+    axis.text.y.left = element_text(colour = "#2B7BBA"),
+    axis.text.y.right = element_text(colour = "#D97925"),
+    axis.title.y.left = element_text(colour = "#2B7BBA", margin = margin(r = 8)),
+    axis.title.y.right = element_text(colour = "#D97925", margin = margin(l = 8)),
+    axis.title.x = element_text(margin = margin(t = 8)),
+    legend.position = "top", legend.text = element_text(size = 10.5),
+    plot.caption = element_text(size = 9, hjust = 0, margin = margin(t = 10)),
+    plot.margin = margin(8, 8, 8, 8)
+  )
+
+print(figure5_scatter)
+```
+
+```{r}
+#| label: figure5-scatter-export
+# 4. Export the dual-axis scatter plot ------------------------------------------------
+ggsave(
+  "outputs/Figure5_Exposure_concentration_duration.png", plot = figure5_scatter,
+  width = 6.3, height = 5.5, units = "in", dpi = 300, bg = "white"
+)
+```
+
+### Figure 6 — Distribution of measured biofilm responses
+
+Read all recorded responses from Excel and count independent studies in the 16 defined subgroups. Count each study once within each subgroup. These descriptive counts are not filtered by whether effect sizes can be calculated.
+
+```{r}
+#| label: figure6-response-data
+library(readxl)
+library(dplyr)
+library(ggplot2)
+
+# 1. Read all recorded biofilm responses --------------------------------------
+# The actual response column is Response_reported. Call it Response here and keep the full original names.
+# Include every non-empty response. Do not read or filter by Mean, SD or meta-analysis eligibility.
+figure6_source <- read_excel(
+  "../03_Extraction_Data/data table - thesis.xlsx",
+  sheet = "Effect_size_data", range = cell_cols("A:F"), col_types = "text"
+) |>
+  transmute(
+    Study_ID = trimws(Study_ID),
+    Response_category = trimws(Response_category),
+    Response = trimws(Response_reported)
+  ) |>
+  filter(!is.na(Response), Response != "") |>
+  distinct()
+
+# 2. Map response names explicitly to 16 subgroups -----------------------------
+# Keep the five main categories unchanged. They describe what was measured and do not imply that indicators in a category can be pooled in a meta-analysis.
+# 16S copy number is only a proxy for microbial abundance, not a direct biomass measure. BIOLOG belongs to carbon metabolism.
+# Keep ROS/LDH/T-AOC as separate stress responses. Retain original Response names and the five main categories.
+
+figure6_rules <- list(
+  "Biomass and Growth" = list(
+    "Biomass and abundance" = c(
+      "16S rRNA gene abundance",
+      "AFDW",
+      "Algal density",
+      "Bacterial biomass",
+      "Bacterial density",
+      "Dry weight",
+      "Fungal biomass"
+    ),
+    "Pigment content" = "Chlorophyll-a",
+    "Growth" = c(
+      "Biofilm growth rate - grazer excluded",
+      "Biofilm growth rate – grazer-accessible"
+    )
+  ),
+  "Biochemical Composition" = list(
+    "EPS" = c(
+      "EPS",
+      "EPS component distribution",
+      "EPS polysaccharides",
+      "EPS protein",
+      "Total carbon EPS"
+    ),
+    "Other biochemical composition" = c(
+      "Autotrophic index",
+      "C:N molar ratio",
+      "C:P molar ratio",
+      "Chlorophyll b:c ratio",
+      "Chlorophyll-a content normalized to AFDM",
+      "Lipid content",
+      "N:P molar ratio",
+      "Total nitrogen",
+      "Total phosphorus"
+    )
+  ),
+  "Functional Processes" = list(
+    "Photosynthesis" = c(
+      "Chl-a production rate",
+      "Effective PSII quantum yield",
+      "Gross primary production",
+      "Maximum electron transport rate (ETRm)",
+      "Photosynthetic efficiency (αRLC)",
+      "Photosynthetic yield"
+    ),
+    "Carbon metabolism and respiration" = c(
+      "Amines",
+      "Amines/amides",
+      "Amino acids",
+      "Beta-glucosidase (GLU)",
+      "Beta-glucosidase activity",
+      "BG activity",
+      "BIOLOG Shannon–Wiener functional diversity",
+      "BIOLOG Simpson functional diversity",
+      "BRS activity",
+      "Carbohydrates",
+      "Carbon metabolic rate",
+      "Carboxylic acids",
+      "CBH activity",
+      "Community respiration",
+      "Esters",
+      "ETS activity",
+      "GPP/CR ratio",
+      "McIntosh index",
+      "Miscellaneous carbon sources",
+      "P:R ratio",
+      "Phenol oxidase activity",
+      "Polymers",
+      "Respiration",
+      "Shannon evenness index",
+      "Shannon–Wiener index",
+      "Sterols",
+      "Total carbon metabolism capacity (K)",
+      "Total carbon utilization"
+    ),
+    "Nutrient cycling" = c(
+      "Alkaline phosphatase activity",
+      "Denitrification rate",
+      "Leucine aminopeptidase (LAP)",
+      "Leucine aminopeptidase activity (LAPA)",
+      "N-NH4 uptake rate",
+      "N-NO2 uptake rate",
+      "N-NO3 uptake rate",
+      "NAG activity",
+      "Nitrification rate",
+      "NO2-N concentration",
+      "NO3-N concentration",
+      "SRP uptake"
+    ),
+    "Physiological stress responses" = c(
+      "LDH",
+      "LDH activity",
+      "ROS generation",
+      "Total antioxidant capacity (T-AOC)"
+    ),
+    "Other functional processes" = "Fungal sporulation rate"
+  ),
+  "Community Diversity" = list(
+    "Alpha diversity" = c(
+      "ACE index",
+      "Eukaryotic Chao1 richness",
+      "Eukaryotic Shannon diversity",
+      "Fungal ACE richness",
+      "Fungal Chao1 richness",
+      "Fungal Shannon diversity",
+      "Fungal Simpson diversity",
+      "nirK Observed species",
+      "nirK Shannon diversity",
+      "nirS Observed species",
+      "nirS Shannon diversity",
+      "Number of fungal OTUs",
+      "Number of observed OTUs",
+      "PD_whole_tree",
+      "Phylogenetic diversity",
+      "Prokaryotic Chao1 richness",
+      "Prokaryotic Shannon diversity",
+      "Prokaryotic Simpson diversity",
+      "Sobs",
+      "Unique OTUs"
+    ),
+    "Community structure" = c(
+      "Beta diversity based on Bray–Curtis distance",
+      "Chlorophyte relative abundance",
+      "Chrysophyte relative abundance",
+      "Cyanophyte relative abundance",
+      "Diatom relative abundance",
+      "Eukaryotic beta diversity",
+      "Eukaryotic community composition (18S)",
+      "Genus-level composition",
+      "nirK community composition",
+      "nirS community composition",
+      "Phenotypic photoautotrophic community composition",
+      "Phylum-level composition",
+      "Prokaryotic beta diversity",
+      "Prokaryotic community composition (16S)",
+      "Prokaryotic community composition (genus level)",
+      "Prokaryotic community composition (phylum level)",
+      "Relative abundance of specific fungal genera",
+      "Relative abundance of specific taxa",
+      "Weighted UniFrac β-diversity"
+    )
+  ),
+  "Other" = list(
+    "Genetic indicators" = c(
+      "acetylglucosaminidase abundance",
+      "amoA abundance",
+      "amylA abundance",
+      "Biofilm succession genes",
+      "cda abundance",
+      "cellobiase abundance",
+      "chitinase abundance",
+      "endoglucanase abundance",
+      "exoglucanase abundance",
+      "gdh abundance",
+      "GeoChip functional gene Pielou evenness index",
+      "GeoChip functional gene Shannon index",
+      "GeoChip functional gene Simpson index",
+      "glucoamylase abundance",
+      "hao abundance",
+      "napA abundance",
+      "narG abundance",
+      "nasA abundance",
+      "nifH abundance",
+      "nirB abundance",
+      "nirK abundance",
+      "nirK gene abundance",
+      "nirK/nirS ratio",
+      "nirS abundance",
+      "nirS gene abundance",
+      "nosZ abundance",
+      "nrfA abundance",
+      "pectinase abundance",
+      "phenol-oxidase abundance",
+      "pulA abundance",
+      "Relative abundance of intI1",
+      "RgaE abundance",
+      "rgl abundance",
+      "ureC abundance"
+    ),
+    "Predicted metabolic pathways" = c(
+      "Predicted metabolic pathway composition (PICRUSt/KEGG)",
+      "Predicted metabolic pathways"
+    ),
+    "Molecular associations and networks" = c(
+      "Co-occurrence network",
+      "Gene-host composition",
+      "Gene-process correlations"
+    ),
+    "Biofilm structure and morphology" = c(
+      "EPS spatial distribution",
+      "Mechanical effects",
+      "Surface morphology"
+    )
+  )
+)
+
+figure6_categories <- names(figure6_rules)
+figure6_lookup <- bind_rows(lapply(figure6_categories, function(category) {
+  stack(figure6_rules[[category]]) |>
+    transmute(
+      Response_category = category,
+      Response = as.character(values),
+      Response_subgroup = as.character(ind)
+    )
+}))
+
+# List unmatched or multiply classified responses as issues and stop further counting.
+figure6_unmatched <- figure6_source |>
+  anti_join(figure6_lookup, by = c("Response_category", "Response")) |>
+  distinct(Study_ID, Response_category, Response)
+figure6_duplicates <- figure6_lookup |>
+  count(Response, name = "Assignments") |>
+  filter(Assignments > 1)
+if (nrow(figure6_unmatched) > 0 || nrow(figure6_duplicates) > 0) {
+  print(figure6_unmatched, n = Inf, width = Inf)
+  print(figure6_duplicates, n = Inf, width = Inf)
+  stop("Some responses are unmatched or assigned more than once. Check the names above first.")
+}
+if (any(is.na(figure6_source$Study_ID) | figure6_source$Study_ID == "")) {
+  stop("Some responses have no Study_ID. Check them first to avoid incorrect counts of independent studies.")
+}
+
+figure6_mapping <- figure6_source |>
+  left_join(figure6_lookup, by = c("Response_category", "Response")) |>
+  arrange(match(Response_category, figure6_categories), Response_subgroup, Response, Study_ID)
+
+# 3. Count independent studies by subgroup, deduplicating Study_ID again after merging ----------------
+figure6_counts <- figure6_mapping |>
+  group_by(Response_category, Response_subgroup) |>
+  summarise(
+    Number_of_studies = n_distinct(Study_ID),
+    Study_IDs = paste(sort(unique(Study_ID)), collapse = ", "),
+    .groups = "drop"
+  ) |>
+  arrange(desc(Number_of_studies), match(Response_category, figure6_categories), Response_subgroup)
+
+# Print response-to-category mappings for each study and independent-study counts for each subgroup.
+print(tibble::tibble(
+  Response_names_in_Excel = n_distinct(figure6_source$Response),
+  Response_names_classified = n_distinct(figure6_mapping$Response),
+  Subgroups = nrow(figure6_counts)
+), width = Inf)
+print(figure6_mapping, n = Inf, width = Inf)
+print(figure6_counts, n = Inf, width = Inf)
+if (nrow(figure6_counts) != 16) {
+  stop("The current data do not form 16 subgroups. Check the mappings and counts above. No categories are automatically removed or invented.")
+}
+
+figure6_colours <- c(
+  "Biomass and Growth" = "#4C8DAE",
+  "Biochemical Composition" = "#58A99A",
+  "Functional Processes" = "#D9A441",
+  "Community Diversity" = "#9B83B0",
+  "Other" = "#D78282"
+)
+```
+
+```{r}
+#| label: fig-figure6-response-coverage
+#| fig-width: 7.8
+#| fig-height: 8.5
+#| dpi: 300
+#| fig-cap: "Individual studies may contribute to multiple response subgroups; therefore, study counts across subgroups are not mutually exclusive."
+
+figure6_plot_data <- figure6_counts
+# The first level of a discrete Y-axis is at the bottom. Reverse the display levels to keep the original first item at the top.
+# Change only the display order. Keep study counts and data row order unchanged.
+figure6_plot_data$Response_subgroup <- factor(
+  figure6_plot_data$Response_subgroup,
+  levels = rev(figure6_plot_data$Response_subgroup)
+)
+figure6_plot_data$Response_category <- factor(
+  figure6_plot_data$Response_category,
+  levels = names(figure6_colours)
+)
+
+# Show full names horizontally. Allocate label space from the actual text width.
+figure6 <- ggplot(
+  figure6_plot_data,
+  aes(x = Number_of_studies, y = Response_subgroup, fill = Response_category)
+) +
+  geom_col(width = 0.72, orientation = "y") +
+  geom_text(aes(label = Number_of_studies), hjust = -0.25, size = 5.3) +
+  scale_x_continuous(
+    breaks = seq(0, max(figure6_plot_data$Number_of_studies), by = 2),
+    expand = expansion(mult = c(0, 0.16))
+  ) +
+  scale_y_discrete(drop = FALSE, expand = expansion(add = 0.6)) +
+  scale_fill_manual(
+    values = figure6_colours,
+    breaks = names(figure6_colours), drop = FALSE
+  ) +
+  labs(x = "Number of studies", y = NULL, fill = NULL) +
+  guides(fill = guide_legend(ncol = 2, byrow = TRUE)) +
+  coord_cartesian(clip = "off") +
+  theme_classic(base_size = 15.5, base_family = "sans") +
+  theme(
+    # The figure is 7.8 inches wide. At 16 cm wide in Word, response labels are about 12.5 pt.
+    axis.text.y = element_text(size = 15.5, angle = 0, hjust = 1,
+                               colour = "black", margin = margin(r = 8)),
+    axis.text.x = element_text(size = 14.5, colour = "black"),
+    axis.title.x = element_text(size = 16, margin = margin(t = 10)),
+    panel.grid.major.x = element_line(colour = "#E6E6E6", linewidth = 0.35),
+    panel.grid.major.y = element_blank(),
+    panel.grid.minor = element_blank(),
+    plot.background = element_rect(fill = "white", colour = NA),
+    legend.position = "top", legend.location = "plot",
+    legend.justification = "center",
+    legend.text = element_text(size = 14.5),
+    legend.key.size = grid::unit(4.5, "mm"),
+    legend.spacing.x = grid::unit(5, "pt"),
+    legend.margin = margin(0, 0, 8, 0),
+    plot.margin = margin(8, 20, 10, 12)
+  )
+
+print(figure6)
+```
+
+```{r}
+#| label: figure6-response-export
+
+# Use the same defined classifications for the study-level mapping table, subgroup count table and horizontal plot.
+write.csv(figure6_mapping, "outputs/Figure6_Response_coverage_mapping.csv",
+          row.names = FALSE, na = "", fileEncoding = "UTF-8")
+write.csv(figure6_counts, "outputs/Figure6_Response_coverage_counts.csv",
+          row.names = FALSE, na = "", fileEncoding = "UTF-8")
+ggsave("outputs/Figure6_Response_coverage_horizontal.png", plot = figure6,
+       width = 7.8, height = 8.5, units = "in", dpi = 300, bg = "white")
+ggsave("outputs/Figure6_Response_coverage_horizontal.pdf", plot = figure6,
+       width = 7.8, height = 8.5, units = "in", device = grDevices::cairo_pdf, bg = "white")
+```
+
+## 4. Meta-analysis
+
+### Hedges' g effect-size calculation
+
+```{r}
+#| label: hedges-g-calculation
+
+# 1. Read response comparisons and create a separate dataset for effect-size calculation -----------------------------
+# Keep the original statistical fields and extraction notes for traceability.
+effect_size_data <- readxl::read_excel(
+  "../03_Extraction_Data/data table - thesis.xlsx",
+  sheet = "Effect_size_data"
+)
+
+original_cols <- names(effect_size_data)
+stat_cols <- c("C_mean", "C_SD", "C_n", "T_mean", "T_SD", "T_n")
+id_cols <- c(
+  "Study_ID", "Experiment_ID", "Control_Arm_ID",
+  "Treatment_Arm_ID", "Response_reported"
+)
+
+meta_data <- effect_size_data |>
+  filter(if_any(
+    all_of(c(id_cols, stat_cols, "Note")),
+    ~ !is.na(.x) & trimws(as.character(.x)) != ""
+  )) |>
+  distinct() |>
+  mutate(
+    Record_ID = row_number(),
+    Note_text = trimws(coalesce(as.character(Note), "")),
+    # S03 Chao1 statistics have been extracted. Ignore the requires digitisation flag during screening.
+    # Keep the original Note. This exception applies only to Prokaryotic Chao1 richness in S03.
+    Note_for_screening = if_else(
+      Study_ID == "S03" & Response_reported == "Prokaryotic Chao1 richness",
+      gsub("requires digiti[sz]ation", "", Note_text, ignore.case = TRUE),
+      Note_text
+    ),
+    # Keep the original Mean, SD and n unchanged. Create separate numeric columns for calculation.
+    across(
+      all_of(stat_cols),
+      ~ suppressWarnings(as.numeric(as.character(.x))),
+      .names = "{.col}_num"
+    )
+  )
+
+
+# 2. Apply response-level note screening and flag shared controls and approximate SDs ---------------------
+# Apply the same group exclusion decision to all treatment comparisons within a study, experiment, response and time point.
+exclude_pattern <- paste(
+  "excluded from (the )?(primary )?meta[- ]analysis",
+  "not (directly )?(eligible|suitable) for Hedges",
+  "not (be )?meta[- ]analy[sz]able",
+  "narrative synthesis only",
+  sep = "|"
+)
+
+review_pattern <- paste(
+  "may not (be )?meta[- ]analy[sz]able",
+  "error[- ]?(bar[- ]?)?type (was )?not reported",
+  "replicates cannot be distinguished",
+  "independence (was |is )?unclear",
+  "requires digiti[sz]ation",
+  sep = "|"
+)
+
+meta_data <- meta_data |>
+  group_by(Study_ID, Experiment_ID, Response_reported, Endpoint_day) |>
+  mutate(
+    Group_note = paste(unique(Note_text[nzchar(Note_text)]), collapse = " | "),
+    Note_excluded = any(
+      grepl(exclude_pattern, Note_for_screening, ignore.case = TRUE) &
+        !grepl("may not", Note_for_screening, ignore.case = TRUE)
+    ),
+    Note_review = any(
+      grepl(review_pattern, Note_for_screening, ignore.case = TRUE)
+    )
+  ) |>
+  ungroup() |>
+  # Use control IDs to identify controls reused by different treatments, whether or not Endpoint_day is filled in.
+  # Shared_control = FALSE does not mean that effect sizes within the study are statistically independent.
+  group_by(Study_ID, Experiment_ID, Control_Arm_ID) |>
+  mutate(
+    Shared_control = n_distinct(Treatment_Arm_ID, na.rm = TRUE) > 1
+  ) |>
+  ungroup() |>
+  mutate(
+    Control_cluster = paste(
+      Study_ID, Experiment_ID, Control_Arm_ID, sep = "__"
+    ),
+    # Flag S01 records with SDs approximated from fitted-model 95% CIs for sensitivity analysis.
+    # Keep Note, Group_note and original statistics. Do not fill in missing Endpoint_day values.
+    Approximate_SD = Study_ID == "S01" & grepl(
+      "SD approximated|fitted[- ]model|95%[[:space:]]*CI",
+      Group_note, ignore.case = TRUE
+    )
+  )
+
+
+# 3. Apply study exclusions and basic statistical requirements ----------------------------------
+# Exclude all records from S06 and S18. This takes priority over numeric completeness and Note screening.
+s06_reason <- paste(
+  "Excluded from the primary meta-analysis because the independence and",
+  "correspondence of the two reported control datasets could not be reliably",
+  "verified. Retained for narrative synthesis."
+)
+
+meta_data <- meta_data |>
+  mutate(
+    # Endpoint_day is not a required identifier. Keep missing S01 times as they are.
+    Missing_ID = if_any(
+      all_of(id_cols),
+      ~ is.na(.x) | trimws(as.character(.x)) == ""
+    ),
+    Mean_ok = if_all(c(C_mean_num, T_mean_num), is.finite),
+    SD_ok = if_all(
+      c(C_SD_num, T_SD_num),
+      ~ is.finite(.x) & .x >= 0
+    ),
+    N_ok = if_all(
+      c(C_n_num, T_n_num),
+      ~ is.finite(.x) & .x >= 2 & .x == floor(.x)
+    ),
+    # An individual group's SD may be 0, but the pooled SD must be finite and positive.
+    Pooled_SD = sqrt(if_else(
+      SD_ok & N_ok,
+      ((C_n_num - 1) * C_SD_num^2 +
+         (T_n_num - 1) * T_SD_num^2) /
+        (C_n_num + T_n_num - 2),
+      NA_real_
+    )),
+    # Record the main exclusion reason when several issues occur together.
+    Exclusion_reason = case_when(
+      Study_ID == "S06" ~ s06_reason,
+      Study_ID == "S18" ~ "Replicate independence unclear",
+      Note_excluded ~ "Excluded by endpoint-level Note; see Group_note",
+      Note_review ~ "Pending review of endpoint-level Note; see Group_note",
+      Missing_ID ~ "Missing comparison identifiers or response name",
+      !Mean_ok ~ "Missing, non-numeric or non-finite mean",
+      !SD_ok ~ "Missing, non-numeric, non-finite or negative SD",
+      !N_ok ~ "Missing or invalid n: both groups require integer n >= 2",
+      !is.finite(Pooled_SD) | Pooled_SD <= 0 ~
+        "Pooled SD is zero or non-finite",
+      TRUE ~ NA_character_
+    )
+  )
+
+meta_ready <- meta_data |>
+  filter(is.na(Exclusion_reason))
+
+
+# 4. Calculate Hedges' g: Treatment - Control --------------------------------
+# Apply the small-sample bias correction to SMD. Use the LS estimator for sampling variance vi.
+# yi > 0 means only that the treatment response is higher. It does not directly indicate an ecological benefit.
+if (nrow(meta_ready) > 0) {
+  calculated <- metafor::escalc(
+    measure = "SMD",
+    m1i = T_mean_num, sd1i = T_SD_num, n1i = T_n_num,
+    m2i = C_mean_num, sd2i = C_SD_num, n2i = C_n_num,
+    vtype = "LS",
+    data = meta_ready
+  ) |>
+    as.data.frame() |>
+    as_tibble()
+} else {
+  calculated <- meta_ready |>
+    mutate(yi = NA_real_, vi = NA_real_)
+}
+
+calculation_failed <- calculated |>
+  filter(!is.finite(yi) | !is.finite(vi) | vi <= 0) |>
+  mutate(
+    Exclusion_reason = "Non-finite effect size or invalid sampling variance"
+  )
+
+# SE and 95% CIs apply to individual effect sizes. Use the normal approximation for these intervals.
+effect_size_calculated <- calculated |>
+  filter(is.finite(yi), is.finite(vi), vi > 0) |>
+  mutate(
+    SE = sqrt(vi),
+    CI_lower = yi - qnorm(0.975) * SE,
+    CI_upper = yi + qnorm(0.975) * SE
+  ) |>
+  select(
+    all_of(original_cols), Record_ID,
+    Control_cluster, Shared_control, Approximate_SD, Group_note,
+    yi, vi, SE, CI_lower, CI_upper
+  )
+
+effect_size_excluded <- bind_rows(
+  filter(meta_data, !is.na(Exclusion_reason)),
+  calculation_failed
+) |>
+  select(
+    all_of(original_cols), Record_ID,
+    Control_cluster, Shared_control, Approximate_SD, Group_note,
+    Exclusion_reason
+  )
+
+
+# 5. Summarise effect sizes, independent studies and inclusion counts for the specified studies -----------------------
+# Keep separate treatment comparisons. Count independent studies by Study_ID and do not combine response indicators.
+study_check <- tibble(Study_ID = c("S01", "S03", "S06", "S18")) |>
+  left_join(
+    count(effect_size_calculated, Study_ID, name = "Included_records"),
+    by = "Study_ID"
+  ) |>
+  left_join(
+    count(effect_size_excluded, Study_ID, name = "Excluded_records"),
+    by = "Study_ID"
+  ) |>
+  mutate(across(c(Included_records, Excluded_records), ~ coalesce(.x, 0L)))
+
+effect_size_summary <- effect_size_calculated |>
+  group_by(Response_category, Response_reported) |>
+  summarise(
+    Studies = n_distinct(Study_ID),
+    Effect_sizes = n(),
+    .groups = "drop"
+  ) |>
+  arrange(Response_category, desc(Studies), Response_reported)
+
+cat(
+  "Total calculated effect sizes:", nrow(effect_size_calculated),
+  "\nIndependent studies included:", n_distinct(effect_size_calculated$Study_ID), "\n"
+)
+print(study_check, n = Inf, width = Inf)
+print(effect_size_summary, n = Inf, width = Inf)
+
+
+# 6. Export calculable and excluded records with original statistics and extraction notes --------------------
+# Retain S06 and S18 records and their exclusion reasons for narrative synthesis.
+write.csv(
+  effect_size_calculated,
+  "outputs/Effect_size_calculated.csv",
+  row.names = FALSE, na = "", fileEncoding = "UTF-8"
+)
+
+write.csv(
+  effect_size_excluded,
+  "outputs/Effect_size_excluded.csv",
+  row.names = FALSE, na = "", fileEncoding = "UTF-8"
+)
+```
+
+### Figure 7 — Overall group effects
+
+Estimate the category-average effect separately for each of the four response groups. Response categories come from Excel; yi and vi come from the calculated effect-size CSV. Check arm IDs and original statistics when joining the inputs.
+Keep only the grazer-excluded response for S01 and exclude all records from S06 and S18. Do not include Other in the category models. A study can appear in more than one category, so category study counts are not mutually exclusive.
+
+Response composition and counts based on actual model inputs are saved in `Figure7_response_composition.csv`. Model and heterogeneity results are saved in `Figure7_model_summary.csv`. The reference classification table is used only for comparison. It does not automatically change categories in the current Excel file.
+
+Interpret the pooled effect as the average standardised numerical change in the measured indicators. A positive value does not always mean improvement. Content per unit biomass differs from total biomass. The signs of changes in element ratios and LDH do not indicate the same direction of functional change. S04/S05 use leaf-decomposer contexts. S01 retains the SD extraction method based on CIs. S16 retains the note about inconsistent units in the original paper.
+The S05 Simpson definition (D, 1−D or 1/D) still needs verification. The analysis keeps the original numerical direction. The category mean therefore does not represent changes in the same direction for every diversity index. Community Diversity has only 4 independent studies and is interpreted as exploratory.
+The primary analysis uses a cross-response working correlation of ρ=0.5. Sensitivity analyses use 0, 0.3, 0.7 and 0.9. type/rho represents cross-response working correlation. Arm IDs and sample sizes approximate correlation from shared groups. The three random-intercept levels describe true heterogeneity between studies, between responses within studies and between treatment comparisons. Their role differs from sampling covariance.
+The analysis steps create model objects and statistical summaries. Separate export chunks use the fitted objects to draw the figures.
+
+```{r}
+#| label: figure7-overall-group-effects
+# 1. Read response categories and calculated effect sizes ------------------------------------
+library(readxl)
+library(dplyr)
+library(metafor)
+
+figure7_groups <- c("Biomass and Growth", "Biochemical Composition",
+  "Functional Processes", "Community Diversity")
+figure7_keys <- c("Study_ID", "Experiment_ID", "Control_Arm_ID", "Treatment_Arm_ID",
+  "Response_reported", "Endpoint_day")
+figure7_stats <- c("C_mean", "C_SD", "C_n", "T_mean", "T_SD", "T_n")
+
+figure7_source <- read_excel("../03_Extraction_Data/data table - thesis.xlsx",
+  sheet = "Effect_size_data", range = cell_cols("A:R")) |>
+  filter(!is.na(Study_ID), !is.na(Response_reported)) |>
+  select(all_of(figure7_keys), Response_category, Response_unit, all_of(figure7_stats), Note) |>
+  distinct()
+figure7_effects <- read.csv("outputs/Effect_size_calculated.csv",
+  stringsAsFactors = FALSE, check.names = FALSE, fileEncoding = "UTF-8-BOM") |>
+  tibble::as_tibble() |>
+  rename(Response_in_calculated_csv = Response_reported) |>
+  mutate(Response_reported = if_else(
+    Study_ID == "S03" & Response_in_calculated_csv ==
+      "Chlorophyll-a content normalized to ash-free dry mass",
+    "Chlorophyll-a content normalized to AFDM", Response_in_calculated_csv
+  )) |>
+  # Apply the study screening rules: exclude S06 and S18 and retain only grazer-excluded S01 responses.
+  filter(!Study_ID %in% c("S06", "S18"),
+    Study_ID != "S01" | Response_reported == "Biofilm growth rate - grazer excluded")
+
+# Excel provides categories, names, units and notes. The CSV provides calculated yi and vi.
+# Standardise the S03 name matches with the dictionary below and check statistics for the same arms during the join.
+figure7_data <- figure7_effects |>
+  select(-Response_category, -Response_unit, -Note) |>
+  left_join(figure7_source, by = figure7_keys, suffix = c("", "_Excel"),
+    relationship = "many-to-one")
+if (anyNA(figure7_data$Response_category)) {
+  stop("Effect sizes do not fully match the current Excel data. Check IDs, response names or sampling times. Do not silently remove rows.")
+}
+for (column in figure7_stats) {
+  current <- suppressWarnings(as.numeric(figure7_data[[paste0(column, "_Excel")]]))
+  if (any(!is.finite(current) |
+      abs(current - figure7_data[[column]]) > 1e-8 * (1 + abs(current)))) {
+    stop("The Excel statistics have changed. Update the effect-size CSV separately first. This section does not recalculate them automatically.")
+  }
+}
+# Trigger an input-consistency check if an Excel comparison has complete statistics but no matching yi and vi.
+figure7_new_comparisons <- figure7_source |>
+  mutate(across(all_of(figure7_stats), ~ suppressWarnings(as.numeric(.x)))) |>
+  filter(Response_category %in% figure7_groups, !Study_ID %in% c("S06", "S18"),
+    Study_ID != "S01" | Response_reported == "Biofilm growth rate - grazer excluded",
+    if_all(all_of(figure7_stats), is.finite), C_SD >= 0, T_SD >= 0,
+    C_n >= 2, T_n >= 2, C_SD > 0 | T_SD > 0) |>
+  anti_join(figure7_effects, by = figure7_keys)
+if (nrow(figure7_new_comparisons)) {
+  print(select(figure7_new_comparisons, all_of(figure7_keys)), n = Inf, width = Inf)
+  stop("Some comparisons in Excel have complete statistics but still need effect-size calculation or an eligibility check. Update the effect-size table first.")
+}
+
+# Standardise names in a separate analysis column. Do not infer Total EPS by adding its components.
+figure7_aliases <- c("AFDW" = "AFDM", "BG activity" = "β-glucosidase activity",
+  "Beta-glucosidase (GLU)" = "β-glucosidase activity",
+  "Beta-glucosidase activity" = "β-glucosidase activity",
+  "Leucine aminopeptidase activity (LAPA)" = "Leucine aminopeptidase activity",
+  "Leucine aminopeptidase (LAP)" = "Leucine aminopeptidase activity")
+figure7_data <- figure7_data |>
+  filter(Response_category %in% figure7_groups) |>
+  mutate(
+    Response_standard = coalesce(unname(figure7_aliases[Response_reported]), Response_reported),
+    Response_standard = if_else(Study_ID %in% c("S16", "S21") &
+      Response_reported %in% c("LDH", "LDH activity"),
+      "Lactate dehydrogenase activity", Response_standard),
+    Response_standard = if_else(Study_ID %in% c("S17", "S19") &
+      Response_reported %in% c("BIOLOG Shannon–Wiener functional diversity", "Shannon–Wiener index"),
+      "BIOLOG Shannon–Wiener functional diversity", Response_standard),
+    Response_standard = if_else(Study_ID == "S19" & Response_reported == "Shannon evenness index",
+      "BIOLOG Shannon evenness", Response_standard),
+    # Retain original group IDs and check for Arm_ID conflicts across experiments within a study.
+    Response_category = factor(Response_category, levels = figure7_groups)
+  ) |>
+  arrange(Response_category, Study_ID, Response_standard, Treatment_Arm_ID, Record_ID)
+stopifnot(!anyDuplicated(figure7_data$Record_ID),
+  all(is.finite(figure7_data$yi)), all(is.finite(figure7_data$vi) & figure7_data$vi > 0))
+
+figure7_inventory <- figure7_data |>
+  group_by(Response_category, Response_standard) |>
+  summarise(Original_names = paste(sort(unique(Response_reported)), collapse = "; "),
+    Studies = n_distinct(Study_ID), Effect_sizes = n(),
+    Study_IDs = paste(sort(unique(Study_ID)), collapse = "; "), .groups = "drop")
+figure7_counts <- figure7_data |>
+  group_by(Response_category) |>
+  summarise(Studies = n_distinct(Study_ID), Effect_sizes = n(),
+    Responses = n_distinct(Response_standard), .groups = "drop")
+print(figure7_inventory, n = Inf, width = Inf)
+print(figure7_counts, n = Inf, width = Inf)
+
+# Use the reference mapping to check classifications. Match S03 names in the same way as the existing input join.
+figure7_reference <- read_excel("Response_category_4_groups_mapping.xlsx",
+  sheet = "Response mapping") |>
+  transmute(
+    Response_standard = if_else(
+      Response_standard == "Chlorophyll-a content normalized to ash-free dry mass",
+      "Chlorophyll-a content normalized to AFDM", Response_standard),
+    Reference_category = Response_Category_new, Classification_note
+  )
+
+# Stop modelling and retain records for review if notes mention exclusion or uncertain independence.
+figure7_note_review <- figure7_data |>
+  mutate(Screening_note = if_else(Study_ID == "S03" &
+    Response_standard == "Prokaryotic Chao1 richness",
+    gsub("requires digiti[sz]ation", "", coalesce(Note, ""), ignore.case = TRUE),
+    coalesce(Note, ""))) |>
+  filter(grepl("excluded|not (directly )?(meta[- ]analy[sz]able|suitable for Hedges)|narrative synthesis only|independence.*unclear|requires digiti[sz]ation",
+    Screening_note, ignore.case = TRUE)) |>
+  distinct(Study_ID, Experiment_ID, Response_reported, Note)
+if (nrow(figure7_note_review)) {
+  print(figure7_note_review, n = Inf, width = Inf)
+  stop("Some included records have notes that need review. Complete the manual decisions first.")
+}
+
+# 2. Interpretation and correlation assumptions for pooling different indicators --------------------------------
+# Estimate the average standardised numerical change across measured indicators in a category. Do not interpret all positive changes as ecological improvement.
+# Changes in LDH, C:N/C:P/N:P, content per unit biomass and BIOLOG functional indices cannot directly be interpreted as health changes in the same direction.
+# Simpson may be reported as D, 1−D or 1/D. Keep the original numerical direction in the analysis.
+# Community Diversity has few independent studies. Interpret its category-average effect as exploratory.
+figure7_pooling_confirmed <- TRUE   # Keep the original numerical direction of each eligible indicator.
+figure7_rho_confirmed <- TRUE       # Use the following cross-response working correlations for the primary and sensitivity analyses.
+figure7_rho_main <- 0.5
+figure7_rho_sensitivity <- c(0, 0.3, 0.7, 0.9)
+if (!figure7_pooling_confirmed || !figure7_rho_confirmed) {
+  stop("The inventory has been printed. First confirm the interpretation across indicators and the correlation assumptions. Then run the model and plotting sections.")
+}
+
+# 3. Fit the four groups separately: shared arms, cross-response correlation and multilevel variation in true effects --------------
+# type/rho in vcalc represents the working correlation between different responses measured on the same samples.
+# ρ approximates the working correlation when covariances are unreported. It is not a correlation estimated from these data.
+# Use arm IDs and sample sizes to approximate correlation from shared groups. Do not additionally assume that experiments are independent.
+# The three random-intercept levels describe true-effect differences between studies, between responses within a study and between treatment comparisons, respectively.
+# V describes sampling correlation; random effects describe true heterogeneity. A non-positive-definite V produces a failure record.
+# Method reference: https://wviechtb.github.io/metafor/reference/vcalc.html
+fit_figure7_group <- function(dat, rho) {
+  warnings <- character()
+  result <- tibble::tibble(Response_category = as.character(dat$Response_category[1]),
+    Rho = rho, Studies = n_distinct(dat$Study_ID), Effect_sizes = nrow(dat),
+    Hedges_g = NA_real_, CI_lower = NA_real_, CI_upper = NA_real_, p_value = NA_real_,
+    Test_df = NA_real_, Sigma2_study = NA_real_, Sigma2_response = NA_real_,
+    Sigma2_comparison = NA_real_, QE = NA_real_, QE_df = NA_integer_, QE_p_value = NA_real_,
+    Optimizers_agree = FALSE, Boundary_estimate = NA, Pool_shown = FALSE,
+    LogLik_difference = NA_real_, Max_variance_difference = NA_real_,
+    Status = "Model not fitted", Diagnostics = "")
+  if (result$Studies < 2) {
+    result$Status <- "Insufficient independent studies"
+    return(list(model = NULL, summary = result))
+  }
+  tryCatch({
+    V <- metafor::vcalc(vi, cluster = Study_ID, type = Response_standard, rho = rho,
+      grp1 = Treatment_Arm_ID, grp2 = Control_Arm_ID, w1 = T_n, w2 = C_n,
+      data = dat, checkpd = TRUE, nearpd = FALSE)
+    dimnames(V) <- rep(list(as.character(dat$Record_ID)), 2)
+    stopifnot(isSymmetric(as.matrix(V)),
+      all(abs(diag(V) - dat$vi) <= 1e-10 * dat$vi))
+    invisible(chol(V))
+    run_fit <- function(control) {
+      withCallingHandlers(metafor::rma.mv(yi, V = V,
+        random = ~ 1 | Study_ID/Response_standard/Record_ID, data = dat,
+        method = "REML", test = "t", dfs = "contain", control = control),
+        warning = function(w) {
+          warnings <<- c(warnings, conditionMessage(w))
+          invokeRestart("muffleWarning")
+        })
+    }
+    model <- run_fit(list(optimizer = "nlminb", iter.max = 2000,
+      eval.max = 4000, rel.tol = 1e-10))
+    # If the optimizer cross-check fails, retain calculable values from the primary fit and clearly mark them as provisional.
+    check <- tryCatch(run_fit(list(optimizer = "BFGS", maxit = 2000, reltol = 1e-10,
+      sigma2.init = pmax(model$sigma2, 1e-6))), error = function(e) {
+        warnings <<- c(warnings, paste("Optimizer check:", conditionMessage(e)))
+        NULL
+      })
+    result$Hedges_g <- as.numeric(coef(model))
+    result$CI_lower <- model$ci.lb
+    result$CI_upper <- model$ci.ub
+    result$p_value <- model$pval
+    result$Test_df <- model$ddf[1]
+    result$Sigma2_study <- model$sigma2[1]
+    result$Sigma2_response <- model$sigma2[2]
+    result$Sigma2_comparison <- model$sigma2[3]
+    result$Boundary_estimate <- any(model$sigma2 < 1e-8)
+    result$QE <- model$QE
+    result$QE_df <- model$k - model$p
+    result$QE_p_value <- model$QEp
+    if (!is.null(check)) {
+      result$LogLik_difference <- abs(as.numeric(logLik(model) - logLik(check)))
+      result$Max_variance_difference <- max(abs(model$sigma2 - check$sigma2) /
+        (1 + pmax(abs(model$sigma2), abs(check$sigma2))))
+      result$Optimizers_agree <- isTRUE(result$LogLik_difference <= 1e-3 &&
+        result$Max_variance_difference <= 1e-3 &&
+        max(abs(c(coef(model), model$ci.lb, model$ci.ub) -
+          c(coef(check), check$ci.lb, check$ci.ub))) <= 1e-3)
+    }
+    if (!result$Optimizers_agree) warnings <- c(warnings, "Optimizer agreement requires review")
+    for (fit in list(model, check)) {
+      if (!is.null(fit$opt.res$convergence) && fit$opt.res$convergence != 0) {
+        warnings <- c(warnings, "Optimizer returned a nonzero convergence code")
+      }
+    }
+    core_ok <- all(is.finite(c(result$Hedges_g, result$CI_lower, result$CI_upper,
+      result$p_value, result$Test_df, model$sigma2))) && result$Test_df > 0 &&
+      all(model$sigma2 >= 0) && result$CI_lower <= result$Hedges_g &&
+      result$Hedges_g <= result$CI_upper
+    if (!core_ok) warnings <- c(warnings, "Core inference incomplete or invalid")
+    result$Pool_shown <- core_ok && result$Optimizers_agree && length(warnings) == 0L
+    result$Status <- if (!result$Pool_shown) "Review required; estimates provisional" else
+      if (result$Boundary_estimate) "Numerical checks passed; boundary variance" else
+        "Numerical checks passed; exploratory category average"
+    result$Diagnostics <- paste(unique(warnings), collapse = " | ")
+    list(model = model, V = V, summary = result)
+  }, error = function(e) {
+    result$Status <- "V or primary model failed"
+    result$Diagnostics <- paste(unique(c(warnings, conditionMessage(e))), collapse = " | ")
+    list(model = NULL, summary = result)
+  })
+}
+```
+
+#### Category-level main models
+
+```{r}
+#| label: figure7-main-models
+figure7_models <- setNames(lapply(figure7_groups, function(group) {
+  fit_figure7_group(filter(figure7_data, Response_category == group), figure7_rho_main)
+}), figure7_groups)
+figure7_model_summary <- bind_rows(lapply(figure7_models, function(x) x$summary))
+print(figure7_model_summary, n = Inf, width = Inf)
+```
+
+#### Response composition and model results
+
+```{r}
+#| label: figure7-composition-model-output
+# Use the data saved in the models to identify the responses actually included. Check them record by record against the inputs read in this section.
+# V represents sampling correlation. Random intercepts describe true heterogeneity between studies, between responses within studies and between comparisons.
+figure7_result_check <- lapply(figure7_groups, function(group) {
+  result <- figure7_models[[group]]
+  fit <- result$model
+  current <- filter(figure7_data, Response_category == group)
+  dat <- if (is.null(fit)) current else fit$data
+  check_cols <- c("Record_ID", figure7_keys, "Response_category", "Response_standard",
+    figure7_stats, "Response_unit", "Note", "yi", "vi")
+  input_matches <- isTRUE(all.equal(
+    as.data.frame(select(dat, all_of(check_cols))),
+    as.data.frame(select(current, all_of(check_cols))), check.attributes = FALSE
+  ))
+
+  # Identify shared controls by study, experiment, response, endpoint and control arm.
+  controls <- dat |>
+    group_by(Study_ID, Experiment_ID, Response_standard, Endpoint_day, Control_Arm_ID) |>
+    summarise(Treatments = n_distinct(Treatment_Arm_ID), .groups = "drop")
+  arm_conflicts <- bind_rows(
+    transmute(dat, Study_ID, Experiment_ID, Arm_ID = Treatment_Arm_ID),
+    transmute(dat, Study_ID, Experiment_ID, Arm_ID = Control_Arm_ID)
+  ) |>
+    distinct() |>
+    count(Study_ID, Arm_ID) |>
+    filter(n > 1)
+  V_order_ok <- V_diagonal_ok <- V_model_ok <- V_shared_arms_ok <- NA
+  if (!is.null(fit)) {
+    V <- result$V
+    V_order_ok <- identical(rownames(V), as.character(dat$Record_ID)) &&
+      identical(colnames(V), as.character(dat$Record_ID))
+    V_diagonal_ok <- all(abs(diag(V) - dat$vi) <= 1e-10 * dat$vi)
+    V_model_ok <- isTRUE(all.equal(as.matrix(V), as.matrix(fit$V), check.attributes = FALSE))
+    same_scope <- outer(dat$Study_ID, dat$Study_ID, "==")
+    shared_arm <- same_scope & (
+      outer(dat$Treatment_Arm_ID, dat$Treatment_Arm_ID, "==") |
+      outer(dat$Control_Arm_ID, dat$Control_Arm_ID, "==") |
+      outer(dat$Treatment_Arm_ID, dat$Control_Arm_ID, "==") |
+      outer(dat$Control_Arm_ID, dat$Treatment_Arm_ID, "==")
+    )
+    # Use the original model's working correlation across responses. Check only the nonzero positions in V; do not replace V.
+    same_response <- outer(dat$Response_standard, dat$Response_standard, "==")
+    expected_nonzero <- shared_arm & (same_response | result$summary$Rho != 0)
+    nonzero <- abs(V) > 1e-10 * sqrt(outer(dat$vi, dat$vi))
+    V_shared_arms_ok <- all(nonzero[upper.tri(V)] == expected_nonzero[upper.tri(V)])
+  }
+
+  # Use NA when optimizer convergence codes were not saved. Report whether a model was returned separately from whether numerical diagnostics passed.
+  convergence_code <- if (is.null(fit$opt.res$convergence)) NA_integer_ else
+    as.integer(fit$opt.res$convergence)
+  tab <- result$summary |>
+    mutate(
+      Primary_fit_returned = !is.null(fit), Primary_convergence_code = convergence_code,
+      Converged = if (is.null(fit)) FALSE else if (is.na(convergence_code)) NA else convergence_code == 0L,
+      Numerical_checks_passed = Pool_shown,
+      Input_matches_current_data = input_matches,
+      Counts_match_input = Studies == n_distinct(dat$Study_ID) & Effect_sizes == nrow(dat),
+      Studies_with_multiple_effects = sum(table(dat$Study_ID) > 1),
+      Shared_control_groups = sum(controls$Treatments > 1),
+      Arm_ID_conflicts = nrow(arm_conflicts),
+      V_order_matches = V_order_ok, V_diagonal_matches_vi = V_diagonal_ok,
+      V_matches_fitted_model = V_model_ok, V_shared_arm_pattern_matches = V_shared_arms_ok
+    )
+  list(data = mutate(dat, Model_fitted = !is.null(fit)), summary = tab)
+})
+figure7_model_summary_output <- bind_rows(lapply(figure7_result_check, function(x) x$summary))
+figure7_model_input <- bind_rows(lapply(figure7_result_check, function(x) x$data))
+figure7_count_check <- figure7_model_summary_output |>
+  select(Response_category, Studies, Effect_sizes, Input_matches_current_data, Counts_match_input) |>
+  left_join(mutate(figure7_counts, Response_category = as.character(Response_category)),
+    by = "Response_category", suffix = c("_model", "_current"))
+print(figure7_count_check, n = Inf, width = Inf)
+if (any(!figure7_count_check$Input_matches_current_data |
+    !figure7_count_check$Counts_match_input |
+    figure7_count_check$Studies_model != figure7_count_check$Studies_current |
+    figure7_count_check$Effect_sizes_model != figure7_count_check$Effect_sizes_current)) {
+  stop("Figure 7 models do not match the current inputs. Fit the current data with the existing models before exporting. Do not reuse old results.")
+}
+
+# Response uses the model's standardised names. Original_names keeps the original spelling. Count studies by unique Study_ID.
+figure7_response_composition <- figure7_model_input |>
+  group_by(Response_category, Response_standard) |>
+  summarise(
+    Study_IDs = paste(sort(unique(Study_ID)), collapse = "; "),
+    Number_of_studies = n_distinct(Study_ID), Number_of_effect_sizes = n(),
+    Original_names = paste(sort(unique(Response_reported)), collapse = "; "),
+    Model_fitted = all(Model_fitted), .groups = "drop"
+  ) |>
+  rename(Response = Response_standard, Study_ID = Study_IDs) |>
+  left_join(figure7_reference, by = c("Response" = "Response_standard"), relationship = "many-to-one") |>
+  mutate(Category_matches_reference = as.character(Response_category) == Reference_category) |>
+  arrange(match(as.character(Response_category), figure7_groups), Response)
+print(figure7_response_composition, n = Inf, width = Inf)
+print(filter(figure7_response_composition, is.na(Category_matches_reference) |
+  !Category_matches_reference), n = Inf, width = Inf)
+
+# QE, its degrees of freedom k−p and its P value come from each primary model. The three sigma² values correspond to the three random-intercept levels.
+# Keep the primary-model results and diagnostics used in the forest plot. Do not substitute rho sensitivity results or calculate single-level I².
+print(figure7_model_summary_output, n = Inf, width = Inf)
+write.csv(figure7_response_composition, "outputs/Figure7_response_composition.csv",
+  row.names = FALSE, na = "", fileEncoding = "UTF-8")
+write.csv(figure7_model_summary_output, "outputs/Figure7_model_summary.csv",
+  row.names = FALSE, na = "", fileEncoding = "UTF-8")
+```
+
+#### Correlation sensitivity analysis
+
+```{r}
+#| label: figure7-rho-sensitivity
+# Use the same data and model, changing only the cross-response working correlation. At ρ = 0, retain shared-control correlation within the same response.
+figure7_rho_results <- bind_rows(lapply(figure7_rho_sensitivity, function(rho) {
+  bind_rows(lapply(figure7_groups, function(group) {
+    fit_figure7_group(filter(figure7_data, Response_category == group), rho)$summary
+  }))
+}))
+print(figure7_rho_results, n = Inf, width = Inf)
+# Report the three heterogeneity variances and the QE test based on the working V. Do not use a single-level I² formula.
+# Studies overlap across categories. The group CIs or P values alone do not establish significant differences between categories.
+```
+
+#### Figure 7 — Overall forest plot
+
+```{r}
+#| label: figure7-overall-forest
+#| fig-width: 10.8
+#| fig-height: 5.0
+
+# 4. Four-row summary forest plot: blue-green squares, grey CIs and a dashed zero line ------------------
+# Draw the title icon with base graphics to represent biofilm attached to a substrate.
+draw_figure7 <- function() {
+  # Increase all text by 25% and keep the font-size hierarchy. Keep symbol and line sizes unchanged.
+  font_scale <- 1.25
+  old_par <- par(mar = c(2.0, 0.5, 0.5, 0.5), family = "sans", bg = "white", xpd = NA)
+  on.exit(par(old_par))
+  plot(NA, xlim = c(0, 1), ylim = c(-0.45, 6.3), xaxs = "i", yaxs = "i",
+    axes = FALSE, ann = FALSE, bty = "n")
+  text(0.105, 5.95, "Benthic biofilm", adj = 0, font = 2, cex = 1.4 * font_scale)
+  angle <- seq(0, 2 * pi, length.out = 80)
+  polygon(0.058 + 0.031 * cos(angle), 5.82 + 0.10 * sin(angle),
+    col = "#BBC4C5", border = NA)
+  segments(c(0.037, 0.050, 0.065, 0.079), 5.91,
+    c(0.035, 0.054, 0.063, 0.082), c(6.12, 6.05, 6.15, 6.08),
+    col = "#287E87", lwd = 2)
+  points(c(0.035, 0.054, 0.063, 0.082), c(6.12, 6.05, 6.15, 6.08),
+    pch = 16, col = "#287E87", cex = 0.6)
+
+  text(0.025, 5.05, "Response category", adj = 0, font = 2, cex = 0.88 * font_scale)
+  text(0.355, 5.05, "Studies", font = 2, cex = 0.88 * font_scale)
+  text(0.445, 5.05, "Effect sizes", font = 2, cex = 0.88 * font_scale)
+  text(0.895, 5.05, "Hedges' g [95% CI]", font = 2, cex = 0.88 * font_scale)
+  segments(0.025, 4.65, 0.985, 4.65, col = "#999999")
+  rows <- 4:1
+  tab <- figure7_model_summary
+  valid <- tab$Pool_shown & is.finite(tab$CI_lower) & is.finite(tab$CI_upper)
+  ticks <- pretty(range(c(0, tab$CI_lower[valid], tab$CI_upper[valid])), n = 4)
+  if (length(ticks) < 2 || diff(range(ticks)) == 0) ticks <- c(-1, 0, 1)
+  limits <- range(ticks)
+  xpos <- function(value) 0.53 + 0.25 * (value - limits[1]) / diff(limits)
+  segments(xpos(0), 0.7, xpos(0), 4.35, col = "#8A8A8A", lty = 2)
+  for (i in seq_along(figure7_groups)) {
+    text(0.025, rows[i], figure7_groups[i], adj = 0, cex = 0.93 * font_scale)
+    text(0.355, rows[i], tab$Studies[i], cex = 0.93 * font_scale)
+    text(0.445, rows[i], tab$Effect_sizes[i], cex = 0.93 * font_scale)
+    if (valid[i]) {
+      segments(xpos(tab$CI_lower[i]), rows[i], xpos(tab$CI_upper[i]), rows[i],
+        col = "#707070", lwd = 1.4)
+      points(xpos(tab$Hedges_g[i]), rows[i], pch = 15, cex = 1.0, col = "#287E87")
+      text(0.895, rows[i], sprintf("%.2f [%.2f, %.2f]", tab$Hedges_g[i],
+        tab$CI_lower[i], tab$CI_upper[i]), cex = 0.86 * font_scale)
+    } else text(0.895, rows[i], "Review required", cex = 0.82 * font_scale, col = "#666666")
+  }
+  axis(1, at = xpos(ticks), labels = format(ticks, trim = TRUE), pos = 0.45,
+    tck = -0.02, mgp = c(1, 0.45, 0), cex.axis = 0.85 * font_scale)
+  text(0.655, -0.16, "Hedges' g", cex = 0.95 * font_scale)
+}
+draw_figure7()
+```
+
+#### Figure 7 — Figure export
+
+```{r}
+#| label: figure7-overall-export
+# Export the summary forest plot and correlation sensitivity results from the fitted objects.
+figure7_outputs <- c("outputs/Figure7_Overall_group_effects.pdf",
+  "outputs/Figure7_Overall_group_effects.png",
+  "outputs/Figure7_Overall_rho_sensitivity.csv")
+grDevices::cairo_pdf(figure7_outputs[1], width = 10.8, height = 5.0)
+tryCatch(draw_figure7(), finally = grDevices::dev.off())
+grDevices::png(figure7_outputs[2], width = 10.8, height = 5.0, units = "in", res = 600)
+tryCatch(draw_figure7(), finally = grDevices::dev.off())
+write.csv(figure7_rho_results, figure7_outputs[3], row.names = FALSE,
+  na = "", fileEncoding = "UTF-8")
+```
+
+### Chlorophyll-a
+
+```{r}
+#| label: chlorophyll-main-models
+
+# 1. Read the calculated Chlorophyll-a effect sizes --------------------------------
+chlorophyll_data <- read.csv(
+  "outputs/Effect_size_calculated.csv",
+  stringsAsFactors = FALSE, check.names = FALSE, fileEncoding = "UTF-8"
+) |>
+  filter(Response_reported == "Chlorophyll-a") |>
+  arrange(Study_ID, Experiment_ID, Control_Arm_ID, Treatment_Arm_ID, Endpoint_day)
+
+# Trigger a check for missing or invalid effect sizes. Do not silently remove treatment comparisons.
+chlorophyll_invalid <- chlorophyll_data |>
+  filter(
+    !is.finite(yi) | !is.finite(vi) | vi <= 0 |
+      !is.finite(C_n) | C_n < 2 | !is.finite(T_n) | T_n < 2
+  )
+if (nrow(chlorophyll_data) == 0 || nrow(chlorophyll_invalid) > 0) {
+  print(chlorophyll_invalid)
+  stop("Chlorophyll-a data are empty or contain invalid statistics. Check the latest effect-size CSV.")
+}
+
+# Summarise shared controls for this response by study, experiment and control ID.
+chlorophyll_check <- chlorophyll_data |>
+  group_by(Study_ID, Experiment_ID, Control_Arm_ID) |>
+  summarise(
+    Comparisons = n(),
+    Treatments = n_distinct(Treatment_Arm_ID),
+    .groups = "drop"
+  ) |>
+  group_by(Study_ID) |>
+  summarise(
+    Effect_sizes = sum(Comparisons),
+    Control_groups = n(),
+    Shared_control_groups = sum(Treatments > 1),
+    Comparisons_with_shared_control = sum(Comparisons[Treatments > 1]),
+    Shared_control_IDs = paste(Control_Arm_ID[Treatments > 1], collapse = ", "),
+    .groups = "drop"
+  )
+
+cat(
+  "Chlorophyll-a:", n_distinct(chlorophyll_data$Study_ID), "studies;",
+  nrow(chlorophyll_data), "effect sizes.\n"
+)
+print(chlorophyll_check, n = Inf, width = Inf)
+
+
+# Check vcalc covariances, record order and arm IDs.
+# Record_ID should uniquely identify each comparison. Check Arm_ID conflicts across experiments within each study.
+audit_chlorophyll_V <- function(dat, V, analysis_label) {
+  arms <- bind_rows(
+    transmute(dat, Study_ID, Experiment_ID, Arm_ID = Treatment_Arm_ID),
+    transmute(dat, Study_ID, Experiment_ID, Arm_ID = Control_Arm_ID)
+  )
+  conflicts <- arms |>
+    group_by(Study_ID, Arm_ID) |>
+    summarise(Experiments = n_distinct(Experiment_ID), .groups = "drop") |>
+    filter(Experiments > 1)
+  if (nrow(conflicts) > 0) print(conflicts, n = Inf, width = Inf)
+
+  # Construct expected_V independently from arm IDs and sample sizes to check the vcalc results.
+  same_scope <- outer(dat$Study_ID, dat$Study_ID, "==") &
+    outer(dat$Experiment_ID, dat$Experiment_ID, "==")
+  same_arm <- function(a, b) outer(dat[[a]], dat[[b]], "==") & same_scope
+  w_t <- 1 / sqrt(dat$T_n)
+  w_c <- 1 / sqrt(dat$C_n)
+  contrast_scale <- sqrt(1 / dat$T_n + 1 / dat$C_n)
+  expected_R <- (
+    same_arm("Treatment_Arm_ID", "Treatment_Arm_ID") * tcrossprod(w_t) +
+      same_arm("Control_Arm_ID", "Control_Arm_ID") * tcrossprod(w_c) -
+      same_arm("Treatment_Arm_ID", "Control_Arm_ID") * outer(w_t, w_c) -
+      same_arm("Control_Arm_ID", "Treatment_Arm_ID") * outer(w_c, w_t)
+  ) / tcrossprod(contrast_scale)
+  expected_V <- expected_R * sqrt(outer(dat$vi, dat$vi))
+  tolerance <- 1e-10 * sqrt(outer(dat$vi, dat$vi))
+  nonzero <- abs(V) > tolerance
+  expected_nonzero <- abs(expected_V) > tolerance
+  upper <- upper.tri(V)
+
+  result <- tibble(
+    Analysis = analysis_label, Effect_sizes = nrow(dat),
+    Record_ID_unique = !anyNA(dat$Record_ID) && anyDuplicated(dat$Record_ID) == 0,
+    Comparisons_unique = nrow(distinct(
+      dat, Study_ID, Experiment_ID, Treatment_Arm_ID, Control_Arm_ID, Endpoint_day
+    )) == nrow(dat),
+    Arm_ID_conflicts = nrow(conflicts),
+    Diagonal_matches_vi = all(abs(diag(V) - dat$vi) <= 1e-10 * dat$vi),
+    Row_order_matches = identical(rownames(V), as.character(dat$Record_ID)) &&
+      identical(colnames(V), as.character(dat$Record_ID)),
+    Expected_shared_pairs = sum(expected_nonzero[upper]),
+    Nonzero_pairs = sum(nonzero[upper]),
+    Unexpected_pairs = sum(upper & nonzero & !expected_nonzero),
+    Missing_shared_pairs = sum(upper & !nonzero & expected_nonzero),
+    V_values_match = all(abs(V - expected_V) <= tolerance)
+  ) |>
+    mutate(Passed = Record_ID_unique & Comparisons_unique & Arm_ID_conflicts == 0 &
+      Diagonal_matches_vi & Row_order_matches & V_values_match &
+      Unexpected_pairs == 0 & Missing_shared_pairs == 0)
+  result
+}
+
+
+# Use the same diagnostic rules for both model types. Retain calculable estimates and distinguish fitting failures from diagnostic warnings.
+# Record differences between optimizers in likelihood, effect size, intervals and variances. Use numerical tolerances to assess agreement.
+review_chlorophyll_fit <- function(model, check_model, dat, V, notes,
+                                   variance_ci_ok, hessian_ok = NA) {
+  compare_ok <- !is.null(check_model)
+  ll_difference <- g_difference <- variance_difference <- ci_difference <- NA_real_
+  if (compare_ok) {
+    ll_difference <- abs(as.numeric(logLik(model)) - as.numeric(logLik(check_model)))
+    g_difference <- abs(as.numeric(coef(model) - coef(check_model)))
+    variance_difference <- max(abs(model$sigma2 - check_model$sigma2) /
+      (1 + abs(model$sigma2)))
+    ci_difference <- max(abs(c(model$ci.lb, model$ci.ub) -
+      c(check_model$ci.lb, check_model$ci.ub)))
+  }
+  optimizer_ok <- isTRUE(compare_ok && ll_difference < 1e-5 &&
+    variance_difference < 1e-3 && g_difference < 1e-4)
+  model_V_ok <- model$k == nrow(dat) &&
+    identical(as.character(model$data$Record_ID), as.character(dat$Record_ID)) &&
+    identical(as.numeric(model$yi), as.numeric(dat$yi)) &&
+    isTRUE(all.equal(as.matrix(model$V), as.matrix(V),
+      tolerance = 1e-10, check.attributes = FALSE))
+  convergence_code <- model$opt.res$convergence
+  converged <- is.null(convergence_code) || isTRUE(convergence_code == 0)
+  core_ok <- all(is.finite(c(coef(model), model$ci.lb, model$ci.ub,
+    model$pval, model$sigma2, model$ddf[1]))) && isTRUE(model$ddf[1] > 0)
+
+  if (!converged) notes <- c(notes, "Primary optimizer did not report convergence")
+  if (!model_V_ok) notes <- c(notes, "Model data/order/V differs from input")
+  if (!core_ok) notes <- c(notes, "Core inference is incomplete or non-finite")
+  if (!optimizer_ok) notes <- c(notes, "Optimizer comparison outside strict tolerance; inspect differences")
+  if (!isTRUE(variance_ci_ok)) notes <- c(notes, "Variance profile CI requires review")
+  if (!is.na(hessian_ok) && !hessian_ok) notes <- c(notes, "Variance Hessian requires review")
+
+  # A boundary estimate alone is not a failure. Warnings do not clear Hedges' g or calculable CIs.
+  boundary <- any(model$sigma2 < 1e-8)
+  needs_review <- length(notes) > 0
+  status <- if (!converged) {
+    "Convergence failure; estimates provisional"
+  } else if (needs_review) {
+    "Review required; estimates provisional"
+  } else if (boundary) {
+    "Caution: variance at boundary"
+  } else "Numerical checks passed"
+
+  values <- tibble(
+    Hedges_g = as.numeric(coef(model)), CI_lower = model$ci.lb,
+    CI_upper = model$ci.ub, p_value = model$pval,
+    Converged = converged, Core_inference_finite = core_ok,
+    Model_V_matches_input = model_V_ok, Optimizers_agree = optimizer_ok,
+    LogLik_difference = ll_difference, Hedges_g_difference = g_difference,
+    Max_relative_variance_difference = variance_difference,
+    Max_CI_difference = ci_difference, Boundary_estimate = boundary,
+    Needs_review = needs_review, Status = status
+  )
+  # Estimates with Needs_review=TRUE are for review only, not final thesis conclusions or plotted pooled effects.
+  list(values = values, notes = notes, stable = !needs_review && core_ok && model_V_ok)
+}
+
+
+# 2. Shared model function: use the same method for the primary analysis and the sensitivity analysis excluding S05 ------------
+# V describes correlation in sampling errors. The two random variances describe true-effect differences between studies and within studies.
+# The group-ID and sample-size method in vcalc approximates shared-control covariance. It is not an exact SMD covariance formula.
+# This covariance approximation applies to one response time point per study. Repeated measurements need an additional correlation structure.
+# Method reference: https://wviechtb.github.io/metafor/reference/vcalc.html
+#           https://wviechtb.github.io/metafor/reference/rma.mv.html
+fit_chlorophyll_model <- function(dat, analysis_label) {
+  notes <- character()
+  V <- NULL
+  v_check <- NULL
+
+  # Capture warnings and errors from model fitting and covariance checks. Return an empty model if fitting fails.
+  capture_step <- function(expr, step) {
+    tryCatch(
+      withCallingHandlers(expr, warning = function(w) {
+        notes <<- c(notes, paste0(step, " warning: ", conditionMessage(w)))
+        invokeRestart("muffleWarning")
+      }),
+      error = function(e) {
+        notes <<- c(notes, paste0(step, " error: ", conditionMessage(e)))
+        NULL
+      }
+    )
+  }
+
+  result <- tibble(
+    Model_structure = "Study + comparison random intercepts",
+    Analysis = analysis_label,
+    Studies = n_distinct(dat$Study_ID), Effect_sizes = nrow(dat),
+    Status = "Model failed", Converged = FALSE, Needs_review = TRUE,
+    V_check_passed = FALSE, Arm_ID_conflicts = NA_integer_, Hedges_g = NA_real_,
+    CI_lower = NA_real_, CI_upper = NA_real_, p_value = NA_real_,
+    Test_df = NA_real_,
+    Sigma2_between_studies = NA_real_, Sigma2_within_study = NA_real_,
+    Between_variance_CI_lower = NA_real_, Between_variance_CI_upper = NA_real_,
+    Within_variance_CI_lower = NA_real_, Within_variance_CI_upper = NA_real_,
+    QE = NA_real_, QE_df = NA_real_, QE_p_value = NA_real_,
+    Optimizers_agree = FALSE, Variance_Hessian_ok = FALSE,
+    Variance_profiles_ok = FALSE, Boundary_estimate = NA,
+    Diagnostics = ""
+  )
+
+  finish <- function(model = NULL, stable = FALSE) {
+    result$Diagnostics <- paste(unique(notes), collapse = " | ")
+    list(model = model, stable = stable, summary = result, V = V, V_check = v_check)
+  }
+
+  # Treatment is the first group and Control is the second, consistent with the direction of the existing yi.
+  # Represent arm correlations with the full V. Keep a non-positive-definite matrix as an input issue.
+  V <- capture_step(metafor::vcalc(
+    vi, cluster = Study_ID,
+    grp1 = Treatment_Arm_ID, grp2 = Control_Arm_ID,
+    w1 = T_n, w2 = C_n, data = dat,
+    checkpd = TRUE, nearpd = FALSE
+  ), "Sampling covariance")
+  if (is.null(V)) return(finish())
+  # Label V rows and columns with Record_ID to check data order.
+  dimnames(V) <- list(as.character(dat$Record_ID), as.character(dat$Record_ID))
+  v_check <- capture_step(audit_chlorophyll_V(
+    dat, V, paste("Multilevel", analysis_label, sep = " / ")
+  ), "V audit")
+  result$V_check_passed <- !is.null(v_check) && isTRUE(v_check$Passed)
+  if (!is.null(v_check)) result$Arm_ID_conflicts <- v_check$Arm_ID_conflicts
+  if (!result$V_check_passed) {
+    notes <- c(notes, "V audit failed; do not fit until input is checked")
+    result$Status <- "Input check failed"
+    return(finish())
+  }
+  if (is.null(capture_step(chol(V), "Positive-definite V"))) return(finish())
+
+  model <- capture_step(metafor::rma.mv(
+    yi, V = V, random = ~ 1 | Study_ID/Record_ID,
+    data = dat, method = "REML", test = "t", dfs = "contain",
+    cvvc = TRUE
+  ), "Primary fit")
+  if (is.null(model)) return(finish())
+  if (model$k != nrow(dat)) notes <- c(notes, "Model omitted input comparisons")
+
+  # Cross-check the fit with another optimizer using the same random structure and V.
+  check_model <- capture_step(metafor::rma.mv(
+    yi, V = V, random = ~ 1 | Study_ID/Record_ID,
+    data = dat, method = "REML", test = "t", dfs = "contain",
+    control = list(optimizer = "BFGS")
+  ), "Optimizer check")
+
+  # Use profile-likelihood intervals for variance components to assess uncertainty near boundaries.
+  variance_ci <- capture_step(do.call(rbind, lapply(1:2, function(j) {
+    stats::confint(model, sigma2 = j)$random[1, ]
+  })), "Variance profiles")
+
+  result$Sigma2_between_studies <- model$sigma2[1]
+  result$Sigma2_within_study <- model$sigma2[2]
+  result$Boundary_estimate <- any(model$sigma2 < 1e-8)
+  result$QE <- model$QE
+  result$QE_df <- model$k - model$p
+  result$QE_p_value <- model$QEp
+  result$Test_df <- model$ddf[1]
+
+  # Retain variance estimates and diagnostics. Mark the pooled estimate for review when there are diagnostic warnings.
+  result$Variance_Hessian_ok <- isTRUE(is.matrix(model$vvc) &&
+    identical(dim(model$vvc), c(2L, 2L)) && all(is.finite(model$vvc)) &&
+    min(eigen(model$vvc, symmetric = TRUE, only.values = TRUE)$values) > 0 &&
+    kappa(model$vvc, exact = TRUE) < 1e8)
+  result$Variance_profiles_ok <- isTRUE(!is.null(variance_ci) &&
+    all(is.finite(variance_ci)) &&
+    all(variance_ci[, "ci.ub"] > variance_ci[, "ci.lb"]))
+  if (!is.null(variance_ci)) {
+    result$Between_variance_CI_lower <- variance_ci[1, "ci.lb"]
+    result$Between_variance_CI_upper <- variance_ci[1, "ci.ub"]
+    result$Within_variance_CI_lower <- variance_ci[2, "ci.lb"]
+    result$Within_variance_CI_upper <- variance_ci[2, "ci.ub"]
+  }
+
+  checked <- review_chlorophyll_fit(
+    model, check_model, dat, V, notes,
+    variance_ci_ok = result$Variance_profiles_ok,
+    hessian_ok = result$Variance_Hessian_ok
+  )
+  for (column in names(checked$values)) result[[column]] <- checked$values[[column]]
+  notes <- checked$notes
+  finish(model, stable = checked$stable)
+}
+
+# 3. Keep all comparisons in the primary analysis. Exclude S05 as a whole only in the sensitivity analysis. ------------------------
+chlorophyll_main <- fit_chlorophyll_model(chlorophyll_data, "All studies")
+chlorophyll_without_s05 <- fit_chlorophyll_model(
+  filter(chlorophyll_data, Study_ID != "S05"), "Excluding S05"
+)
+
+# Give a compact V check. Count each nonzero comparison pair once in the upper triangle and do not print the full matrix.
+chlorophyll_v_check <- bind_rows(
+  chlorophyll_main$V_check, chlorophyll_without_s05$V_check
+)
+print(chlorophyll_v_check, n = Inf, width = Inf)
+
+# Report the two heterogeneity variances and the generalised Q test. Do not use a single-level I² formula.
+# Use t inference with containment df. Do not call this a Knapp-Hartung correction.
+chlorophyll_model_summary <- bind_rows(
+  chlorophyll_main$summary, chlorophyll_without_s05$summary
+)
+print(chlorophyll_model_summary, n = Inf, width = Inf)
+if (!chlorophyll_main$stable || !chlorophyll_without_s05$stable) {
+  message("Some models need review. Their estimates have been retained. Results with Needs_review=TRUE must not be used for final thesis conclusions.")
+}
+write.csv(
+  chlorophyll_model_summary, "outputs/Chlorophyll_a_model_summary.csv",
+  row.names = FALSE, na = "", fileEncoding = "UTF-8"
+)
+```
+
+#### Chlorophyll-a — Study-intercept sensitivity analysis
+
+```{r}
+#| label: chlorophyll-study-intercept-sensitivity
+
+# 1. Use the primary-analysis data and their sampling covariance matrix ----------------------------
+# Compare all studies with the data excluding S05 in the sensitivity analysis.
+# The simpler model has only a study random intercept. The full V still represents sampling correlation.
+# Take V from the primary analysis's vcalc result and keep its row and column order aligned with the data.
+chlorophyll_sensitivity_data <- chlorophyll_data
+chlorophyll_sensitivity_V <- chlorophyll_main$V
+
+if (is.null(chlorophyll_sensitivity_data) ||
+    is.null(chlorophyll_sensitivity_V) ||
+    nrow(chlorophyll_sensitivity_data) != nrow(chlorophyll_sensitivity_V)) {
+  stop("The completed Chlorophyll-a primary-model object, its data and V must be available first.")
+}
+
+
+# 2. Shared simpler model: Study_ID random intercept, REML and small-sample t inference --------------
+# Use the same model and diagnostic tolerances for both datasets.
+# Variance may validly be 0, so use profile-likelihood intervals to check uncertainty near the boundary.
+# Zero variance is a valid boundary. A boundary or Hessian diagnostic alone cannot establish model failure.
+# Method reference: https://wviechtb.github.io/metafor/reference/confint.rma.html
+fit_chlorophyll_study_intercept <- function(dat, V, analysis_label) {
+  issues <- character()
+  v_check <- NULL
+  capture_step <- function(expr, step) {
+    tryCatch(
+      withCallingHandlers(expr, warning = function(w) {
+        issues <<- c(issues, paste0(step, " warning: ", conditionMessage(w)))
+        invokeRestart("muffleWarning")
+      }),
+      error = function(e) {
+        issues <<- c(issues, paste0(step, " error: ", conditionMessage(e)))
+        NULL
+      }
+    )
+  }
+
+  result <- tibble(
+    Model_structure = "Study random intercept",
+    Analysis = analysis_label,
+    Studies = n_distinct(dat$Study_ID), Effect_sizes = nrow(dat),
+    Hedges_g = NA_real_, CI_lower = NA_real_, CI_upper = NA_real_,
+    p_value = NA_real_, Test_df = NA_real_,
+    Sigma2_study = NA_real_, Variance_CI_lower = NA_real_,
+    Variance_CI_upper = NA_real_, Boundary_estimate = NA,
+    Converged = FALSE, Optimizers_agree = FALSE, Variance_CI_ok = FALSE,
+    QE = NA_real_, QE_df = NA_real_, QE_p_value = NA_real_,
+    Status = "Model failed", Needs_review = TRUE, V_check_passed = FALSE,
+    Arm_ID_conflicts = NA_integer_, Diagnostics = ""
+  )
+
+  finish <- function(model = NULL) {
+    result$Diagnostics <- paste(unique(issues), collapse = " | ")
+    list(model = model, summary = result, V_check = v_check)
+  }
+
+  v_check <- capture_step(audit_chlorophyll_V(
+    dat, V, paste("Study intercept", analysis_label, sep = " / ")
+  ), "V audit")
+  result$V_check_passed <- !is.null(v_check) && isTRUE(v_check$Passed)
+  if (!is.null(v_check)) result$Arm_ID_conflicts <- v_check$Arm_ID_conflicts
+  if (!result$V_check_passed) {
+    issues <- c(issues, "V audit failed; do not fit until input is checked")
+    result$Status <- "Input check failed"
+    return(finish())
+  }
+
+  # Capture optimization failures and retain the full V for shared-control correlation.
+  model <- capture_step(metafor::rma.mv(
+    yi, V = V, random = ~ 1 | Study_ID, data = dat,
+    method = "REML", test = "t", dfs = "contain", level = 95
+  ), "Primary fit")
+  if (is.null(model)) return(finish())
+  result$Converged <- TRUE
+  if (model$k != nrow(dat)) issues <- c(issues, "Model omitted input comparisons")
+
+  check_model <- capture_step(metafor::rma.mv(
+    yi, V = V, random = ~ 1 | Study_ID, data = dat,
+    method = "REML", test = "t", dfs = "contain", level = 95,
+    control = list(optimizer = "BFGS")
+  ), "Optimizer check")
+
+  variance_ci <- capture_step(
+    stats::confint(model, sigma2 = 1, level = 95)$random[1, ],
+    "Variance profile CI"
+  )
+  result$Sigma2_study <- model$sigma2[1]
+  result$Boundary_estimate <- model$sigma2[1] < 1e-8
+  result$Test_df <- model$ddf[1]
+  result$QE <- model$QE
+  result$QE_df <- model$k - model$p
+  result$QE_p_value <- model$QEp
+
+  result$Variance_CI_ok <- isTRUE(!is.null(variance_ci) &&
+    all(is.finite(variance_ci)) &&
+    variance_ci["ci.ub"] > variance_ci["ci.lb"] &&
+    variance_ci["ci.lb"] <= model$sigma2[1] + 1e-6 &&
+    variance_ci["ci.ub"] >= model$sigma2[1] - 1e-6)
+  if (!is.null(variance_ci)) {
+    result$Variance_CI_lower <- variance_ci["ci.lb"]
+    result$Variance_CI_upper <- variance_ci["ci.ub"]
+  }
+
+  checked <- review_chlorophyll_fit(
+    model, check_model, dat, V, issues, variance_ci_ok = result$Variance_CI_ok
+  )
+  for (column in names(checked$values)) result[[column]] <- checked$values[[column]]
+  issues <- checked$notes
+  finish(model)
+}
+
+# 3. Compare all data with the data excluding S05 using the same simpler model -------------------------
+# When excluding S05, subset both the rows and columns of V.
+chlorophyll_keep_without_s05 <- chlorophyll_sensitivity_data$Study_ID != "S05"
+
+chlorophyll_simple_all <- fit_chlorophyll_study_intercept(
+  chlorophyll_sensitivity_data, chlorophyll_sensitivity_V, "All studies"
+)
+chlorophyll_simple_without_s05 <- fit_chlorophyll_study_intercept(
+  chlorophyll_sensitivity_data[chlorophyll_keep_without_s05, , drop = FALSE],
+  chlorophyll_sensitivity_V[
+    chlorophyll_keep_without_s05, chlorophyll_keep_without_s05, drop = FALSE
+  ],
+  "Excluding S05"
+)
+
+
+# 4. Summarise the simpler-model sensitivity results ------------------------------------
+# The simpler model assumes no additional comparison-level true heterogeneity within studies. This is a sensitivity assumption.
+# Passing numerical checks does not make small-sample estimates precise. Interpret them with the variance intervals and Q test.
+chlorophyll_sensitivity_summary <- bind_rows(
+  chlorophyll_simple_all$summary, chlorophyll_simple_without_s05$summary
+)
+print(chlorophyll_sensitivity_summary, n = Inf, width = Inf)
+
+# Show the two-level and study-intercept models side by side, each with all studies and with S05 excluded.
+chlorophyll_comparison <- bind_rows(chlorophyll_model_summary, chlorophyll_sensitivity_summary) |>
+  mutate(Study_variance = coalesce(Sigma2_between_studies, Sigma2_study)) |>
+  select(Model_structure, Analysis, Studies, Effect_sizes, Hedges_g, CI_lower, CI_upper,
+    Study_variance, Comparison_variance = Sigma2_within_study, Status, Needs_review)
+print(chlorophyll_comparison, n = Inf, width = Inf)
+chlorophyll_v_check <- bind_rows(
+  chlorophyll_main$V_check, chlorophyll_without_s05$V_check,
+  chlorophyll_simple_all$V_check, chlorophyll_simple_without_s05$V_check
+)
+print(chlorophyll_v_check, n = Inf, width = Inf)
+if (any(chlorophyll_sensitivity_summary$Needs_review)) {
+  message("Some simpler models need review. Estimates are retained, but results with Needs_review=TRUE must not be used for final conclusions.")
+}
+write.csv(
+  chlorophyll_sensitivity_summary, "outputs/Chlorophyll_a_sensitivity_summary.csv",
+  row.names = FALSE, na = "", fileEncoding = "UTF-8"
+)
+```
+
+### Biofilm biomass and growth
+
+```{r}
+#| label: biofilm-biomass-growth-models
+
+# 1. Read the calculated biofilm mass and growth effect sizes ------------------------------
+# Use the CSV exported by the effect-size calculation step, containing existing yi, vi and extraction information.
+# Keep original Response names and all extraction information. For S01, include only grazer-excluded responses.
+biofilm_mass_data <- read.csv(
+  "outputs/Effect_size_calculated.csv",
+  stringsAsFactors = FALSE, check.names = FALSE, fileEncoding = "UTF-8"
+) |>
+  tibble::as_tibble() |>
+  filter(
+    (Study_ID %in% c("S14", "S15", "S16", "S21") & Response_reported == "Dry weight") |
+      (Study_ID == "S03" & Response_reported %in% c("AFDW", "AFDM")) |
+      (Study_ID == "S01" & Response_reported == "Biofilm growth rate - grazer excluded")
+  ) |>
+  arrange(Study_ID, Experiment_ID, Treatment_Arm_ID, Record_ID)
+
+# S01 may have missing Endpoint_day values. Retain SDs approximated from fitted-model 95% CIs.
+# Keep S16 dry-weight units as reported, including the note about inconsistent units and the original values.
+biofilm_mass_counts <- biofilm_mass_data |>
+  group_by(Response_reported, Study_ID) |>
+  summarise(
+    Effect_sizes = n(),
+    Control_groups = n_distinct(Experiment_ID, Control_Arm_ID),
+    Shared_control = Effect_sizes > Control_groups, .groups = "drop"
+  )
+print(biofilm_mass_counts, n = Inf, width = Inf)
+stopifnot(
+  !anyNA(biofilm_mass_data$Record_ID), !anyDuplicated(biofilm_mass_data$Record_ID),
+  all(is.finite(biofilm_mass_data$yi)),
+  all(is.finite(biofilm_mass_data$vi) & biofilm_mass_data$vi > 0),
+  all(is.finite(biofilm_mass_data$C_n) & biofilm_mass_data$C_n >= 2),
+  all(is.finite(biofilm_mass_data$T_n) & biofilm_mass_data$T_n >= 2)
+)
+
+# 2. Construct an approximate sampling covariance V for shared experimental groups --------------------------------
+# V handles sampling correlation from shared controls. Two-level random effects describe true-effect heterogeneity and cannot replace V.
+# Approximate correlation using actual Arm_IDs and group sample sizes. This is not an exact SMD covariance formula.
+# Each study contributes one response. Identify group correlations using the original arm IDs.
+# Do not fill in S01 times or add a repeated-measures correlation assumption.
+# S01 fitted-model estimates may have extra correlation not represented by V. Assess its influence by excluding S01.
+biofilm_mass_V <- metafor::vcalc(
+  vi, cluster = Study_ID,
+  grp1 = Treatment_Arm_ID, grp2 = Control_Arm_ID,
+  w1 = T_n, w2 = C_n, data = biofilm_mass_data,
+  checkpd = TRUE, nearpd = FALSE
+)
+dimnames(biofilm_mass_V) <- rep(list(as.character(biofilm_mass_data$Record_ID)), 2)
+
+# Check the diagonal of V, its row and column order, and whether nonzero covariances correspond to shared experimental groups.
+same_scope <- outer(biofilm_mass_data$Study_ID, biofilm_mass_data$Study_ID, "==") &
+  outer(biofilm_mass_data$Experiment_ID, biofilm_mass_data$Experiment_ID, "==")
+shared_arm <- same_scope & (
+  outer(biofilm_mass_data$Treatment_Arm_ID, biofilm_mass_data$Treatment_Arm_ID, "==") |
+    outer(biofilm_mass_data$Control_Arm_ID, biofilm_mass_data$Control_Arm_ID, "==") |
+    outer(biofilm_mass_data$Treatment_Arm_ID, biofilm_mass_data$Control_Arm_ID, "==") |
+    outer(biofilm_mass_data$Control_Arm_ID, biofilm_mass_data$Treatment_Arm_ID, "==")
+)
+upper <- upper.tri(biofilm_mass_V)
+nonzero <- abs(biofilm_mass_V) > 1e-10 * sqrt(outer(biofilm_mass_data$vi, biofilm_mass_data$vi))
+biofilm_mass_V_check <- tibble::tibble(
+  Diagonal_matches_vi = all(abs(diag(biofilm_mass_V) - biofilm_mass_data$vi) <=
+    1e-10 * biofilm_mass_data$vi),
+  Row_order_matches = identical(rownames(biofilm_mass_V), as.character(biofilm_mass_data$Record_ID)) &
+    identical(colnames(biofilm_mass_V), as.character(biofilm_mass_data$Record_ID)),
+  Shared_pairs_expected = sum(shared_arm[upper]),
+  Nonzero_pairs = sum(nonzero[upper]),
+  Shared_arm_pattern_matches = all(nonzero[upper] == shared_arm[upper]),
+  Symmetric = isSymmetric(as.matrix(biofilm_mass_V))
+)
+print(biofilm_mass_V_check, n = Inf, width = Inf)
+stopifnot(with(biofilm_mass_V_check,
+  Diagonal_matches_vi & Row_order_matches & Shared_arm_pattern_matches & Symmetric))
+invisible(chol(biofilm_mass_V))  # Stop the analysis if V is not positive definite. Keep the original covariance structure.
+
+# 3. Use the same two-level REML model and diagnostics for the primary and sensitivity analyses ------------------
+# Keep study- and comparison-level random intercepts. Both variances may still be imprecisely estimated with few studies.
+# Record variance boundaries. Zero variance alone is not a failure. Hessian calculations or variance-profile intervals are not required.
+fit_biofilm_mass <- function(dat, V, analysis_label) {
+  notes <- character()
+  run_fit <- function(control, optimizer_label) {
+    tryCatch(
+      withCallingHandlers(
+        metafor::rma.mv(
+          yi, V = V, random = ~ 1 | Study_ID/Record_ID, data = dat,
+          method = "REML", test = "t", dfs = "contain", control = control
+        ),
+        warning = function(w) {
+          notes <<- c(notes, paste(optimizer_label, "warning:", conditionMessage(w)))
+          invokeRestart("muffleWarning")
+        }
+      ),
+      error = function(e) {
+        notes <<- c(notes, paste(optimizer_label, "error:", conditionMessage(e)))
+        NULL
+      }
+    )
+  }
+  result <- tibble::tibble(
+    Analysis = analysis_label, Studies = n_distinct(dat$Study_ID), Effect_sizes = nrow(dat),
+    Responses = paste(unique(dat$Response_reported), collapse = "; "),
+    Hedges_g = NA_real_, CI_lower = NA_real_, CI_upper = NA_real_, p_value = NA_real_,
+    Test_df = NA_real_, Sigma2_between_studies = NA_real_, Sigma2_within_study = NA_real_,
+    Primary_convergence_code = NA_integer_, Check_convergence_code = NA_integer_,
+    LogLik_difference = NA_real_, Hedges_g_difference = NA_real_,
+    Max_CI_difference = NA_real_, Max_relative_variance_difference = NA_real_,
+    Optimizers_agree = FALSE, Boundary_estimate = NA, Model_V_matches_input = FALSE,
+    Status = "Model failed", Needs_review = TRUE, Diagnostics = ""
+  )
+  model <- run_fit(list(
+    optimizer = "nlminb", iter.max = 2000, eval.max = 4000, rel.tol = 1e-10
+  ), "nlminb")
+  if (is.null(model)) {
+    result$Diagnostics <- paste(unique(notes), collapse = " | ")
+    return(list(model = NULL, summary = result))
+  }
+
+  # Cross-check the REML fit with BFGS using the same data, V and random structure.
+  check_model <- run_fit(list(
+    optimizer = "BFGS", maxit = 2000, reltol = 1e-10,
+    sigma2.init = pmax(model$sigma2, 1e-6)
+  ), "BFGS")
+  result$Hedges_g <- as.numeric(coef(model))
+  result$CI_lower <- model$ci.lb
+  result$CI_upper <- model$ci.ub
+  result$p_value <- model$pval
+  result$Test_df <- model$ddf[1]
+  result$Sigma2_between_studies <- model$sigma2[1]
+  result$Sigma2_within_study <- model$sigma2[2]
+  result$Boundary_estimate <- any(model$sigma2 < 1e-8)
+  if (!is.null(model$opt.res$convergence)) {
+    result$Primary_convergence_code <- model$opt.res$convergence
+  }
+  result$Model_V_matches_input <- model$k == nrow(dat) &&
+    identical(as.character(model$data$Record_ID), as.character(dat$Record_ID)) &&
+    isTRUE(all.equal(as.matrix(model$V), as.matrix(V), check.attributes = FALSE, tolerance = 1e-10))
+
+  if (!is.null(check_model)) {
+    if (!is.null(check_model$opt.res$convergence)) {
+      result$Check_convergence_code <- check_model$opt.res$convergence
+    }
+    result$LogLik_difference <- abs(as.numeric(logLik(model) - logLik(check_model)))
+    result$Hedges_g_difference <- abs(as.numeric(coef(model) - coef(check_model)))
+    result$Max_CI_difference <- max(abs(c(model$ci.lb, model$ci.ub) -
+      c(check_model$ci.lb, check_model$ci.ub)))
+    result$Max_relative_variance_difference <- max(abs(model$sigma2 - check_model$sigma2) /
+      (1 + pmax(abs(model$sigma2), abs(check_model$sigma2))))
+  }
+
+  # Assess optimizer agreement using likelihood, effect-size, interval and relative variance differences, and report these differences.
+  # The 0.001 tolerance for g and CIs is finer than the two-decimal precision used in figures. It is not a statistical significance threshold.
+  result$Optimizers_agree <- isTRUE(
+    result$Primary_convergence_code == 0 & result$Check_convergence_code == 0 &
+      result$LogLik_difference <= 1e-3 & result$Hedges_g_difference <= 1e-3 &
+      result$Max_CI_difference <= 1e-3 & result$Max_relative_variance_difference <= 1e-3
+  )
+  core_ok <- all(is.finite(c(result$Hedges_g, result$CI_lower, result$CI_upper,
+    result$p_value, result$Test_df, model$sigma2))) && result$Test_df > 0 &&
+    all(model$sigma2 >= 0) && result$CI_lower <= result$Hedges_g &&
+    result$CI_upper >= result$Hedges_g
+  if (!core_ok) notes <- c(notes, "Core inference incomplete or invalid")
+  if (!result$Model_V_matches_input) notes <- c(notes, "Model data/order/V differs from input")
+  if (!result$Optimizers_agree) notes <- c(notes, "Optimizer agreement requires review")
+  result$Needs_review <- length(notes) > 0
+  result$Status <- if (result$Needs_review) {
+    "Review required; estimates provisional"
+  } else if (result$Boundary_estimate) {
+    "Caution: variance at boundary; few studies"
+  } else "Numerical checks passed; few studies"
+  result$Diagnostics <- paste(unique(notes), collapse = " | ")
+  list(model = model, summary = result)
+}
+
+# 4. Include S01 in the primary analysis. For sensitivity analysis, exclude S01 and subset both rows and columns of V. -----------
+# Excluding S01 changes both the indicator scope and the estimation method. Differences cannot be attributed to only one of these changes.
+biofilm_mass_main <- fit_biofilm_mass(
+  biofilm_mass_data, biofilm_mass_V, "Main: DW + AFDW/AFDM + growth"
+)
+keep_without_s01 <- biofilm_mass_data$Study_ID != "S01"
+biofilm_mass_without_s01 <- fit_biofilm_mass(
+  biofilm_mass_data[keep_without_s01, ],
+  biofilm_mass_V[keep_without_s01, keep_without_s01, drop = FALSE],
+  "Sensitivity: DW + AFDW/AFDM; excluding S01"
+)
+```
+
+```{r}
+#| label: biofilm-biomass-growth-summary
+
+# QE is the generalised Q test of residual heterogeneity based on the model's V. Its degrees of freedom are k − p.
+# Take the statistic and P value from QE and QEp in the corresponding fitted object. Keep NA when there is no pooled model.
+extract_model_QE <- function(result) {
+  fit <- result$model
+  dplyr::mutate(result$summary,
+    QE = if (is.null(fit)) NA_real_ else fit$QE,
+    QE_df = if (is.null(fit)) NA_real_ else fit$k - fit$p,
+    QE_p_value = if (is.null(fit)) NA_real_ else fit$QEp
+  )
+}
+
+biofilm_mass_model_summary <- bind_rows(lapply(
+  list(biofilm_mass_main, biofilm_mass_without_s01), extract_model_QE
+))
+print(biofilm_mass_model_summary, n = Inf, width = Inf)
+if (any(biofilm_mass_model_summary$Needs_review)) {
+  message("Some models need review. Calculable estimates are retained but are not yet used for final thesis conclusions.")
+}
+write.csv(
+  biofilm_mass_model_summary, "outputs/Biofilm_biomass_growth_model_summary.csv",
+  row.names = FALSE, na = "", fileEncoding = "UTF-8"
+)
+# With only 5–6 independent studies, numerical convergence does not remove uncertainty from the small sample or approximate V.
+```
+
+### EPS-related responses
+
+```{r}
+#| label: eps-data-models
+
+# 1. Read EPS response records and calculated effect sizes --------------------------------
+# Use the same inclusion rules as the effect-size calculation. Statistics and notes must agree between Excel and CSV.
+# Limit the input to actual data columns A:R to avoid blank columns that only have formatting on the right of the sheet.
+eps_source <- readxl::read_excel(
+  "../03_Extraction_Data/data table - thesis.xlsx", sheet = "Effect_size_data",
+  range = readxl::cell_cols("A:R"), col_types = "text"
+) |>
+  filter(grepl("EPS|extracellular polymer", Response_reported, ignore.case = TRUE)) |>
+  distinct()
+eps_data <- read.csv(
+  "outputs/Effect_size_calculated.csv",
+  stringsAsFactors = FALSE, check.names = FALSE, fileEncoding = "UTF-8"
+) |>
+  tibble::as_tibble() |>
+  filter(grepl("EPS|extracellular polymer", Response_reported, ignore.case = TRUE))
+
+# Check statistics and Note for matching comparisons in Excel and CSV.
+eps_keys <- c("Study_ID", "Experiment_ID", "Control_Arm_ID", "Treatment_Arm_ID", "Response_reported")
+eps_stat_cols <- c("C_mean", "C_SD", "C_n", "T_mean", "T_SD", "T_n")
+eps_current <- left_join(
+  eps_data, select(eps_source, all_of(c(eps_keys, eps_stat_cols)), Note),
+  by = eps_keys, suffix = c("", "_Excel")
+)
+if (nrow(eps_current) != nrow(eps_data)) {
+  stop("EPS comparison IDs are not unique. Check Excel and the effect-size table first.")
+}
+for (column in eps_stat_cols) {
+  current <- suppressWarnings(as.numeric(eps_current[[paste0(column, "_Excel")]]))
+  if (any(!is.finite(current) |
+      abs(eps_current[[column]] - current) > 1e-8 * (1 + abs(current)))) {
+    stop("EPS data have changed. Run the existing Hedges' g calculation chunk first to update the effect-size CSV.")
+  }
+}
+if (any(coalesce(eps_current$Note, "") != coalesce(eps_current$Note_Excel, ""))) {
+  stop("EPS extraction notes have changed. Update the effect-size table first and retain the latest inclusion decisions.")
+}
+
+# 2. Define EPS groups and retain original response names ----------------------------------
+# Keep Total carbon EPS separate from Total EPS. Do not infer Total EPS by adding its components.
+eps_groups <- c("Total EPS", "EPS polysaccharides", "EPS proteins", "Total carbon EPS")
+eps_group_map <- c(
+  "EPS" = "Total EPS", "EPS polysaccharides" = "EPS polysaccharides",
+  "EPS protein" = "EPS proteins", "Total carbon EPS" = "Total carbon EPS"
+)
+eps_source <- mutate(eps_source, EPS_group = unname(eps_group_map[Response_reported]))
+eps_data <- eps_data |>
+  mutate(EPS_group = unname(eps_group_map[Response_reported])) |>
+  arrange(match(EPS_group, eps_groups), Study_ID, Experiment_ID, Treatment_Arm_ID, Record_ID)
+if (anyNA(eps_data$EPS_group)) {
+  print(distinct(filter(eps_data, is.na(EPS_group)), Study_ID, Response_reported),
+    n = Inf, width = Inf)
+  stop("A quantitative EPS response has no confirmed classification. Confirm it first. Responses are not combined automatically.")
+}
+
+# The inventory also keeps original EPS indicators that were not included. Count available studies by unique Study_ID.
+eps_classification <- eps_source |>
+  group_by(EPS_group, Response_reported) |>
+  summarise(
+    Study_IDs_recorded = paste(sort(unique(Study_ID)), collapse = ", "),
+    Studies_recorded = n_distinct(Study_ID), Records_recorded = n(), .groups = "drop"
+  ) |>
+  left_join(
+    eps_data |>
+      group_by(Response_reported) |>
+      summarise(
+        Study_IDs_available = paste(sort(unique(Study_ID)), collapse = ", "),
+        Studies_available = n_distinct(Study_ID), Effect_sizes_available = n(), .groups = "drop"
+      ),
+    by = "Response_reported"
+  ) |>
+  mutate(
+    EPS_group = coalesce(EPS_group, "Qualitative EPS distribution; not pooled"),
+    Study_IDs_available = coalesce(Study_IDs_available, ""),
+    across(c(Studies_available, Effect_sizes_available), ~ coalesce(.x, 0L))
+  ) |>
+  arrange(match(EPS_group, eps_groups), Response_reported)
+print(eps_classification, n = Inf, width = Inf)
+# EPS component/spatial distribution is qualitative evidence and is not included in the meta-analysis.
+# Carbohydrates (AWCD) measures substrate use, not EPS polysaccharide content.
+
+# 3. Model EPS groups separately without pooling effects across components ------------------------
+# Use fit_biofilm_mass() for fitting and diagnostics, and audit_chlorophyll_V() for shared-control covariance checks.
+# These functions are defined in the biofilm mass and growth and chlorophyll analyses, respectively, and are dependencies of this section.
+# EPS models use this section's data and V, not fitted results for other indicators.
+# A study can contribute to several EPS groups. Do not treat the pooled group results as independent between-group comparisons.
+analyse_eps_group <- function(group_name) {
+  dat <- filter(eps_data, EPS_group == group_name)
+  result <- list(model = NULL, data = dat, V = NULL, V_check = NULL,
+    summary = tibble::tibble(
+      Analysis = group_name, Studies = n_distinct(dat$Study_ID), Effect_sizes = nrow(dat),
+      Responses = paste(unique(dat$Response_reported), collapse = "; "),
+      Hedges_g = NA_real_, CI_lower = NA_real_, CI_upper = NA_real_, p_value = NA_real_,
+      Sigma2_between_studies = NA_real_, Sigma2_within_study = NA_real_,
+      Status = if (nrow(dat) == 0) "No eligible quantitative data" else "One study; individual effects only",
+      Needs_review = FALSE, Pool_shown = FALSE, Diagnostics = ""
+    ))
+  # Do not fit a cross-study pooled model for a group with fewer than two independent studies.
+  if (n_distinct(dat$Study_ID) < 2) return(result)
+
+  # V handles sampling correlation from shared controls. Random effects handle true heterogeneity between studies and between comparisons.
+  # Fit groups separately. Each study contributes one response within a group, so no cross-component correlation is specified.
+  tryCatch({
+    V <- metafor::vcalc(
+      vi, cluster = Study_ID, grp1 = Treatment_Arm_ID, grp2 = Control_Arm_ID,
+      w1 = T_n, w2 = C_n, data = dat, checkpd = TRUE, nearpd = FALSE
+    )
+    dimnames(V) <- rep(list(as.character(dat$Record_ID)), 2)
+    # Check shared experimental groups, vi, row and column order, and group-ID conflicts.
+    v_check <- audit_chlorophyll_V(dat, V, group_name)
+    if (!isTRUE(v_check$Passed)) stop("Shared-arm V audit failed")
+    invisible(chol(V))
+    fitted <- fit_biofilm_mass(dat, V, group_name)
+    fitted$data <- dat
+    fitted$V <- V
+    fitted$V_check <- v_check
+    fitted$summary$Pool_shown <- !is.null(fitted$model) && !isTRUE(fitted$summary$Needs_review)
+    fitted
+  }, error = function(e) {
+    result$summary$Status <- "V/model check failed; individual effects only"
+    result$summary$Needs_review <- TRUE
+    result$summary$Diagnostics <- conditionMessage(e)
+    result
+  })
+}
+eps_models <- setNames(lapply(eps_groups, analyse_eps_group), eps_groups)
+```
+
+```{r}
+#| label: eps-model-summary
+
+# Take QE for EPS polysaccharides and proteins from their rma.mv models. Degrees of freedom are k−p and the test P value is QEp.
+# p_value tests whether the overall mean effect is 0. QE_p_value tests residual heterogeneity. Keep both fields separately.
+# Total EPS and Total carbon EPS have no pooled models. Keep all three heterogeneity fields as NA.
+eps_model_summary <- bind_rows(lapply(eps_models, extract_model_QE))
+figure8_V_check <- bind_rows(lapply(eps_models, function(x) x$V_check))
+print(figure8_V_check, n = Inf, width = Inf)
+print(eps_model_summary, n = Inf, width = Inf)
+write.csv(
+  eps_model_summary, "outputs/EPS_model_summary.csv",
+  row.names = FALSE, na = "", fileEncoding = "UTF-8"
+)
+# For poolable groups, use REML, Study_ID/Record_ID random intercepts and t inference with containment df.
+# Retain estimates when optimizers disagree or a fit needs review, but set Pool_shown=FALSE and do not draw a diamond.
+```
+
+### Prokaryotic alpha diversity
+
+Chao1 and Shannon are analysed separately as exploratory responses. Each has 10 calculated effect sizes from S02, S03 and S15. For each indicator, S15 contributes 6 treatment comparisons sharing one control. Simpson has 6 eligible comparisons from only one study, so it is neither pooled across studies nor plotted separately.
+
+Each response uses shared-control sampling covariance approximated from arm IDs and sample sizes. Both models use study- and comparison-level random intercepts, REML, and t inference with containment df. No cross-response correlation coefficient is specified. Fits are checked with two optimizers. A zero-variance boundary alone does not count as failure. There are only 3 independent studies, so passing numerical checks still does not guarantee precise estimates.
+
+Chao1 and Shannon each produce primary-model results and diagnostics. Their pooled results are used in Figure 8 and Table 1.
+
+```{r}
+#| label: alpha-diversity-data-model-function
+# 1. Read calculated prokaryotic Chao1 and Shannon effect sizes -------------------------
+library(dplyr)
+library(metafor)
+alpha_diversity_data <- read.csv("outputs/Effect_size_calculated.csv",
+  stringsAsFactors = FALSE, check.names = FALSE, fileEncoding = "UTF-8-BOM") |>
+  tibble::as_tibble() |>
+  filter(Response_reported %in% c("Prokaryotic Chao1 richness", "Prokaryotic Shannon diversity"),
+    !Study_ID %in% c("S06", "S18")) |>
+  arrange(Response_reported, Study_ID, Experiment_ID, Treatment_Arm_ID, Record_ID)
+stopifnot(nrow(alpha_diversity_data) > 0, !anyDuplicated(alpha_diversity_data$Record_ID),
+  all(is.finite(alpha_diversity_data$yi)), all(is.finite(alpha_diversity_data$vi) & alpha_diversity_data$vi > 0),
+  all(is.finite(alpha_diversity_data$CI_lower)), all(is.finite(alpha_diversity_data$CI_upper)),
+  all(is.finite(alpha_diversity_data$C_n) & alpha_diversity_data$C_n >= 2),
+  all(is.finite(alpha_diversity_data$T_n) & alpha_diversity_data$T_n >= 2))
+
+# Check shared controls for each response. Multiple treatment comparisons do not count as multiple studies.
+alpha_diversity_controls <- alpha_diversity_data |>
+  group_by(Response_reported, Study_ID, Experiment_ID, Control_Arm_ID) |>
+  summarise(Comparisons = n(), Treatments = n_distinct(Treatment_Arm_ID), .groups = "drop")
+alpha_diversity_study_counts <- alpha_diversity_controls |>
+  group_by(Response_reported, Study_ID) |>
+  summarise(Effect_sizes = sum(Comparisons), Shared_control_groups = sum(Treatments > 1),
+    Shared_control_IDs = paste(Control_Arm_ID[Treatments > 1], collapse = "; "), .groups = "drop")
+print(alpha_diversity_study_counts, n = Inf, width = Inf)
+
+# 2. Fit Chao1 and Shannon separately using the same model and diagnostic methods ----------------
+# Each model contains one response. Approximate sampling covariance using arm IDs and sample sizes.
+# Represent sampling correlation from shared controls; Study_ID/Record_ID describes two-level true heterogeneity.
+# Use original arm IDs to identify shared groups. Do not additionally assume independence between experiments.
+# Method: https://wviechtb.github.io/metafor/reference/vcalc.html
+#       https://wviechtb.github.io/metafor/reference/rma.mv.html
+fit_alpha_diversity_model <- function(dat, response_name) {
+  notes <- character()
+  model <- V <- NULL
+  controls <- dat |>
+    group_by(Study_ID, Experiment_ID, Control_Arm_ID) |>
+    summarise(Treatments = n_distinct(Treatment_Arm_ID), .groups = "drop")
+  result <- tibble::tibble(
+    Analysis = response_name, Studies = n_distinct(dat$Study_ID), Effect_sizes = nrow(dat),
+    Exploratory = TRUE, Shared_control_groups = sum(controls$Treatments > 1),
+    Hedges_g = NA_real_, CI_lower = NA_real_, CI_upper = NA_real_, p_value = NA_real_,
+    Test_df = NA_real_, Sigma2_between_studies = NA_real_, Sigma2_within_study = NA_real_,
+    QE = NA_real_, QE_df = NA_integer_, QE_p_value = NA_real_,
+    Primary_convergence_code = NA_integer_, Check_convergence_code = NA_integer_,
+    LogLik_difference = NA_real_, Hedges_g_difference = NA_real_,
+    Max_CI_difference = NA_real_, Max_relative_variance_difference = NA_real_,
+    Optimizers_agree = FALSE, Boundary_estimate = NA, Model_V_matches_input = FALSE,
+    Needs_review = TRUE, Pool_shown = FALSE, Status = "Model not fitted", Diagnostics = ""
+  )
+  if (result$Studies < 2) {
+    result$Status <- "Insufficient independent studies; not pooled"
+    return(list(data = dat, V = V, model = model, summary = result))
+  }
+  run_fit <- function(control, label) {
+    withCallingHandlers(metafor::rma.mv(yi, V = V,
+      random = ~ 1 | Study_ID/Record_ID, data = dat,
+      method = "REML", test = "t", dfs = "contain", control = control),
+      warning = function(w) {
+        notes <<- c(notes, paste(label, "warning:", conditionMessage(w)))
+        invokeRestart("muffleWarning")
+      })
+  }
+  tryCatch({
+    V <- metafor::vcalc(vi, cluster = Study_ID,
+      grp1 = Treatment_Arm_ID, grp2 = Control_Arm_ID, w1 = T_n, w2 = C_n,
+      data = dat, checkpd = TRUE, nearpd = FALSE)
+    dimnames(V) <- rep(list(as.character(dat$Record_ID)), 2)
+    stopifnot(isSymmetric(as.matrix(V)), all(abs(diag(V) - dat$vi) <= 1e-10 * dat$vi))
+    invisible(chol(V))  # Stop fitting if V is not positive definite. Keep the original covariance structure.
+    model <- run_fit(list(optimizer = "nlminb", iter.max = 2000,
+      eval.max = 4000, rel.tol = 1e-10), "nlminb")
+    # Cross-check the fit with BFGS using the same data, V and random structure.
+    check <- tryCatch(run_fit(list(optimizer = "BFGS", maxit = 2000, reltol = 1e-10,
+      sigma2.init = pmax(model$sigma2, 1e-6)), "BFGS"), error = function(e) {
+        notes <<- c(notes, paste("BFGS error:", conditionMessage(e)))
+        NULL
+      })
+    result$Hedges_g <- as.numeric(coef(model))
+    result$CI_lower <- model$ci.lb
+    result$CI_upper <- model$ci.ub
+    result$p_value <- model$pval
+    result$Test_df <- model$ddf[1]
+    result$Sigma2_between_studies <- model$sigma2[1]
+    result$Sigma2_within_study <- model$sigma2[2]
+    result$Boundary_estimate <- any(model$sigma2 < 1e-8)
+    result$QE <- model$QE
+    result$QE_df <- model$k - model$p
+    result$QE_p_value <- model$QEp
+    result$Model_V_matches_input <- model$k == nrow(dat) &&
+      identical(as.character(model$data$Record_ID), as.character(dat$Record_ID)) &&
+      isTRUE(all.equal(as.matrix(model$V), as.matrix(V), check.attributes = FALSE, tolerance = 1e-10))
+    if (!is.null(model$opt.res$convergence)) {
+      result$Primary_convergence_code <- model$opt.res$convergence
+      if (isTRUE(result$Primary_convergence_code != 0)) notes <- c(notes, "Primary optimizer did not converge")
+    }
+    if (!is.null(check)) {
+      if (!is.null(check$opt.res$convergence)) {
+        result$Check_convergence_code <- check$opt.res$convergence
+        if (isTRUE(result$Check_convergence_code != 0)) notes <- c(notes, "Check optimizer did not converge")
+      }
+      result$LogLik_difference <- abs(as.numeric(logLik(model) - logLik(check)))
+      result$Hedges_g_difference <- abs(as.numeric(coef(model) - coef(check)))
+      result$Max_CI_difference <- max(abs(c(model$ci.lb, model$ci.ub) - c(check$ci.lb, check$ci.ub)))
+      result$Max_relative_variance_difference <- max(abs(model$sigma2 - check$sigma2) /
+        (1 + pmax(abs(model$sigma2), abs(check$sigma2))))
+      result$Optimizers_agree <- isTRUE(result$LogLik_difference <= 1e-3 &&
+        result$Hedges_g_difference <= 1e-3 && result$Max_CI_difference <= 1e-3 &&
+        result$Max_relative_variance_difference <= 1e-3)
+    }
+    core_ok <- all(is.finite(c(result$Hedges_g, result$CI_lower, result$CI_upper,
+      result$p_value, result$Test_df, model$sigma2))) && result$Test_df > 0 &&
+      all(model$sigma2 >= 0) && result$CI_lower <= result$Hedges_g &&
+      result$Hedges_g <= result$CI_upper
+    if (!core_ok) notes <- c(notes, "Core inference incomplete or invalid")
+    if (!result$Model_V_matches_input) notes <- c(notes, "Model data/order/V differs from input")
+    if (!result$Optimizers_agree) notes <- c(notes, "Optimizer agreement requires review")
+    # A valid zero variance alone is not a failure. Passing numerical checks still does not mean that three studies allow precise inference.
+    result$Needs_review <- length(notes) > 0
+    result$Pool_shown <- core_ok && !result$Needs_review
+    result$Status <- if (result$Needs_review) "Review required; estimates provisional" else
+      if (result$Boundary_estimate) "Exploratory; numerical checks passed; variance at boundary" else
+        "Exploratory; numerical checks passed; few independent studies"
+    result$Diagnostics <- paste(unique(notes), collapse = " | ")
+    list(data = dat, V = V, model = model, summary = result)
+  }, error = function(e) {
+    result$Status <- "V or primary model failed; no pooled estimate shown"
+    result$Diagnostics <- paste(unique(c(notes, conditionMessage(e))), collapse = " | ")
+    list(data = dat, V = V, model = model, summary = result)
+  })
+}
+```
+
+#### Prokaryotic Chao1 richness
+
+```{r}
+#| label: chao1-main-model
+# Keep all eligible treatment comparisons in the Chao1 model, separate from the Shannon analysis.
+chao1_analysis <- fit_alpha_diversity_model(filter(alpha_diversity_data, Response_reported == "Prokaryotic Chao1 richness"),
+  "Prokaryotic Chao1 richness")
+chao1_model_summary <- chao1_analysis$summary
+print(chao1_model_summary, n = Inf, width = Inf)
+write.csv(chao1_model_summary, "outputs/Prokaryotic_Chao1_model_summary.csv",
+  row.names = FALSE, na = "", fileEncoding = "UTF-8")
+if (chao1_model_summary$Needs_review) {
+  message("Chao1 model needs review. Diagnostics and provisional estimates are retained.")
+}
+```
+
+#### Prokaryotic Shannon diversity
+
+```{r}
+#| label: shannon-main-model
+# Fit Shannon separately using the same model and diagnostic rules as Chao1.
+shannon_analysis <- fit_alpha_diversity_model(filter(alpha_diversity_data, Response_reported == "Prokaryotic Shannon diversity"),
+  "Prokaryotic Shannon diversity")
+shannon_model_summary <- shannon_analysis$summary
+print(shannon_model_summary, n = Inf, width = Inf)
+write.csv(shannon_model_summary, "outputs/Prokaryotic_Shannon_model_summary.csv",
+  row.names = FALSE, na = "", fileEncoding = "UTF-8")
+if (shannon_model_summary$Needs_review) {
+  message("Shannon model needs review. Diagnostics and provisional estimates are retained.")
+}
+```
+
+### Table 1 — Heterogeneity in primary analyses
+
+```{r}
+#| label: tbl-heterogeneity-summary
+#| tbl-cap: "Heterogeneity in category-level and endpoint-level primary analyses."
+
+# N is the number of independent studies and k is the number of effect sizes. Take all statistics directly from existing primary models.
+# Category models have study, within-study response and record levels. Single-indicator models have study and record levels.
+table1_extract_heterogeneity <- function(result, analysis, response_level) {
+  fit <- result$model
+  sigma2 <- if (is.null(fit)) rep(NA_real_, if (response_level) 3L else 2L) else fit$sigma2
+  stopifnot(length(sigma2) == if (response_level) 3L else 2L)
+  tibble::tibble(
+    Analysis = analysis, Studies = result$summary$Studies,
+    Effect_sizes = if (is.null(fit)) result$summary$Effect_sizes else fit$k,
+    Between_study = sigma2[1],
+    Within_study_response = if (response_level) sigma2[2] else NA_real_,
+    Between_record = sigma2[if (response_level) 3L else 2L],
+    Response_level_present = response_level,
+    QE = if (is.null(fit)) NA_real_ else fit$QE,
+    QE_df = if (is.null(fit)) NA_real_ else fit$k - fit$p,
+    QE_p_value = if (is.null(fit)) NA_real_ else fit$QEp
+  )
+}
+table1_category_results <- bind_rows(lapply(names(figure7_models), function(category) {
+  table1_extract_heterogeneity(figure7_models[[category]], paste0("Category: ", category), TRUE)
+}))
+table1_endpoint_models <- list(
+  "Chlorophyll-a" = chlorophyll_main,
+  "Biofilm mass and growth" = biofilm_mass_main,
+  "EPS polysaccharides" = eps_models[["EPS polysaccharides"]],
+  "EPS proteins" = eps_models[["EPS proteins"]],
+  "Prokaryotic Chao1 richness" = chao1_analysis,
+  "Prokaryotic Shannon diversity" = shannon_analysis
+)
+table1_endpoint_results <- bind_rows(lapply(names(table1_endpoint_models), function(endpoint) {
+  table1_extract_heterogeneity(table1_endpoint_models[[endpoint]], paste0("Endpoint: ", endpoint), FALSE)
+}))
+table1_numeric <- bind_rows(table1_category_results, table1_endpoint_results)
+
+# A dash means that the model has no such random-effect level. Show zero variance as 0 and a missing fit as NA.
+# p value is the P value for QE, not for the overall Hedges' g.
+table1_format_number <- function(x, digits = 3L) {
+  ifelse(is.na(x), "NA", formatC(x, format = "f", digits = digits))
+}
+table1 <- table1_numeric |>
+  transmute(
+    Analysis,
+    `N / k` = paste(Studies, Effect_sizes, sep = " / "),
+    `Between-study σ²` = table1_format_number(Between_study),
+    `Within-study response σ²` = if_else(Response_level_present,
+      table1_format_number(Within_study_response), "—"),
+    `Between-record σ²` = table1_format_number(Between_record),
+    `QE (df)` = if_else(is.na(QE), "NA",
+      paste0(table1_format_number(QE, 2L), " (", QE_df, ")")),
+    `p value` = case_when(is.na(QE_p_value) ~ "NA", QE_p_value < 0.001 ~ "<0.001",
+                          TRUE ~ table1_format_number(QE_p_value))
+  )
+write.csv(table1, "outputs/Table1_Heterogeneity_summary.csv", row.names = FALSE,
+          na = "", fileEncoding = "UTF-8")
+knitr::kable(table1, row.names = FALSE)
+```
+
+### Figure 8 — Pooled effects of representative biofilm responses
+
+```{r}
+#| label: figure8-summary-inputs
+# 1. Collect primary results from the separate response models and retain full numeric precision from the CSVs.
+library(dplyr)
+figure8_result_files <- c(
+  chlorophyll = "Chlorophyll_a_model_summary.csv", mass = "Biofilm_biomass_growth_model_summary.csv",
+  eps = "EPS_model_summary.csv", chao1 = "Prokaryotic_Chao1_model_summary.csv",
+  shannon = "Prokaryotic_Shannon_model_summary.csv"
+)
+figure8_result_tables <- lapply(figure8_result_files, function(file) {
+  read.csv(file.path("outputs", file), stringsAsFactors = FALSE,
+    check.names = FALSE, fileEncoding = "UTF-8-BOM")
+})
+figure8_spec <- tibble::tribble(
+  ~Group, ~Response, ~Source, ~Analysis, ~Expected_studies, ~Expected_effects,
+  "Biomass and growth", "Chlorophyll-a", "chlorophyll", "All studies", 5L, 19L,
+  "Biomass and growth", "Biofilm mass and growth", "mass", "Main: DW + AFDW/AFDM + growth", 6L, 22L,
+  "Biochemical composition", "EPS polysaccharides", "eps", "EPS polysaccharides", 5L, 19L,
+  "Biochemical composition", "EPS proteins", "eps", "EPS proteins", 5L, 19L,
+  "Community diversity", "Prokaryotic Chao1 richness", "chao1", "Prokaryotic Chao1 richness", 3L, 10L,
+  "Community diversity", "Prokaryotic Shannon diversity", "shannon", "Prokaryotic Shannon diversity", 3L, 10L
+)
+figure8_data <- bind_rows(lapply(seq_len(nrow(figure8_spec)), function(i) {
+  spec <- figure8_spec[i, ]
+  result <- figure8_result_tables[[spec$Source]] |>
+    filter(Analysis == spec$Analysis)
+  stopifnot(nrow(result) == 1L, !isTRUE(result$Needs_review),
+    result$Studies == spec$Expected_studies, result$Effect_sizes == spec$Expected_effects,
+    all(is.finite(c(result$Hedges_g, result$CI_lower, result$CI_upper))))
+  if ("Pool_shown" %in% names(result)) stopifnot(isTRUE(result$Pool_shown))
+  tibble::tibble(Group = spec$Group, Response = spec$Response,
+    Studies = result$Studies, Effect_sizes = result$Effect_sizes,
+    yi = result$Hedges_g, CI_lower = result$CI_lower, CI_upper = result$CI_upper,
+    Source_file = figure8_result_files[[spec$Source]], Source_analysis = result$Analysis)
+}))
+print(figure8_data, n = Inf, width = Inf)
+
+# Fix the export location in the thesis project so it does not depend on R's working directory. PNGs are 300 dpi.
+save_figure8 <- function(draw, stem, height) {
+  project_dir <- normalizePath("C:/Users/87236/Desktop/Final essay/Thesis data analysis",
+    winslash = "/", mustWork = TRUE)
+  output_dir <- file.path(project_dir, "outputs")
+  dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+  png_file <- file.path(output_dir, paste0(stem, ".png"))
+  pdf_file <- file.path(output_dir, paste0(stem, ".pdf"))
+  message("Current working directory: ", normalizePath(getwd(), winslash = "/"),
+    "\nOutput directory: ", output_dir)
+
+  grDevices::cairo_pdf(pdf_file,
+    width = 6.3, height = height, pointsize = 10, bg = "white")
+  tryCatch(draw(), finally = grDevices::dev.off())
+  grDevices::png(png_file,
+    width = 6.3, height = height, units = "in", res = 300, pointsize = 10,
+    bg = "white", type = "cairo")
+  tryCatch(draw(), finally = grDevices::dev.off())
+  message("Saved PNG: ", png_file, "\nSaved PDF: ", pdf_file)
+  invisible(c(PNG = png_file, PDF = pdf_file))
+}
+```
+
+```{r}
+#| label: fig-figure8-pooled-summary
+#| fig-width: 6.3
+#| fig-height: 4.8
+#| fig-cap: "Pooled effects of representative biofilm responses. Each response was modelled separately; studies may overlap across responses. Biofilm mass and growth combines dry weight, AFDM/AFDW and AFDM-based growth rate from grazer-excluded comparisons. Chao1 and Shannon analyses are exploratory, with three independent studies each. Signs indicate numerical changes relative to controls, not improvement or deterioration. All markers have equal size."
+
+# Use six existing primary models in three groups without further pooling across indicators. Use full-precision interval endpoints for the lines.
+draw_figure8_data <- function() {
+  old <- par(mar = c(1.5, 0.35, 1.9, 0.35), ps = 10, cex = 1,
+    family = "sans", bg = "white", xpd = NA)
+  on.exit(par(old), add = TRUE)
+  plot(NA, xlim = c(0, 1), ylim = c(-1.3, 11.2), xaxs = "i", yaxs = "i",
+    axes = FALSE, ann = FALSE, bty = "n")
+  title("Representative biofilm responses", cex.main = 1.1, line = 0.4)
+  rows <- c(8.3, 7.3, 5.3, 4.3, 2.3, 1.3)
+  for (i in c(2L, 3L)) {
+    indices <- (2L * i - 1L):(2L * i)
+    rect(0.005, min(rows[indices]) - 0.45, 0.998, max(rows[indices]) + 0.45,
+      col = "#F1F6F6", border = NA)
+  }
+  text(0.015, 10.55, "Response", adj = 0, font = 2, cex = 0.9)
+  text(0.365, 10.55, "Studies", font = 2, cex = 0.85)
+  text(0.455, 10.55, "Effect\nsizes", font = 2, cex = 0.85)
+  text(0.995, 10.55, "Hedges' g [95% CI]", adj = 1, font = 2, cex = 0.85)
+  segments(0.005, 9.95, 0.998, 9.95, col = "#A8AFB0", lwd = 0.8)
+  text(0.015, c(9.2, 6.2, 3.2), unique(figure8_data$Group),
+    adj = 0, font = 2, cex = 0.98, col = "#195C60")
+  labels <- c("Chlorophyll-a", "Biofilm mass and\ngrowth", "EPS polysaccharides", "EPS proteins",
+    "Prokaryotic Chao1\nrichness", "Prokaryotic Shannon\ndiversity")
+  ticks <- pretty(range(figure8_data$CI_lower, figure8_data$CI_upper, 0), n = 4)
+  limits <- range(ticks)
+  xpos <- function(value) 0.56 + 0.23 * (value - limits[1]) / diff(limits)
+  segments(xpos(0), 0.7, xpos(0), 8.8, lty = 2, col = "#8A8A8A")
+  text(0.015, rows, labels, adj = 0, cex = 0.92)
+  text(0.365, rows, figure8_data$Studies, cex = 0.92)
+  text(0.455, rows, figure8_data$Effect_sizes, cex = 0.92)
+  segments(xpos(figure8_data$CI_lower), rows, xpos(figure8_data$CI_upper), rows,
+    col = "#707070", lwd = 1.25)
+  points(xpos(figure8_data$yi), rows, pch = 15, cex = 0.85, col = "#287F83")
+  text(0.995, rows, sprintf("%.2f [%.2f, %.2f]", figure8_data$yi,
+    figure8_data$CI_lower, figure8_data$CI_upper), adj = 1, cex = 0.83)
+  axis(1, at = xpos(ticks), labels = format(ticks, trim = TRUE), pos = 0.15,
+    tck = -0.015, mgp = c(1, 0.45, 0), cex.axis = 0.85)
+  text(0.675, -0.95, "Hedges' g", cex = 0.95)
+}
+draw_figure8_data()
+save_figure8(draw_figure8_data, "Figure8_Representative_response_effects", 4.8)
+```
+
+### Figure 9 — Individual effect estimates for selected biofilm functional responses
+
+```{r}
+#| label: figure9-data
+# 1. Read calculated effect sizes and retain PSII effective quantum yield and LDH activity separately -----------
+# Keep yi, vi and individual 95% CIs from the effect-size table. The direction is Treatment − Control.
+# Hedges' g already includes the small-sample bias correction. Individual intervals use the normal approximation; do not recalculate them here.
+library(dplyr)
+library(metafor)
+
+figure9_titles <- c(
+  "Effective PSII quantum yield" = "(a) Effective PSII quantum yield",
+  "Lactate dehydrogenase activity" = "(b) Lactate dehydrogenase activity"
+)
+figure9_data <- read.csv("outputs/Effect_size_calculated.csv",
+  stringsAsFactors = FALSE, check.names = FALSE, fileEncoding = "UTF-8-BOM") |>
+  tibble::as_tibble() |>
+  mutate(
+    # Use the existing common name for S16 LDH activity and S21 LDH. Keep the original names.
+    Response_standard = if_else(Study_ID %in% c("S16", "S21") &
+      Response_reported %in% c("LDH", "LDH activity"),
+      "Lactate dehydrogenase activity", Response_reported)
+  ) |>
+  filter(Response_standard %in% names(figure9_titles), !Study_ID %in% c("S06", "S18")) |>
+  arrange(match(Response_standard, names(figure9_titles)),
+    Study_ID, Experiment_ID, Treatment_Arm_ID, Control_Arm_ID, Record_ID) |>
+  mutate(
+    # Shorten arm prefixes in the plot. Keep full study, experiment, treatment and control IDs in the data.
+    Comparison_label = paste0(Study_ID, " | ", sub("^S[0-9]+_", "", Experiment_ID), ": ",
+      sub("^S[0-9]+_E[0-9]+_", "", Treatment_Arm_ID), " vs ",
+      sub("^S[0-9]+_E[0-9]+_", "", Control_Arm_ID))
+  )
+
+figure9_counts <- figure9_data |>
+  group_by(Response_standard) |>
+  summarise(Studies = n_distinct(Study_ID), Effect_sizes = n(),
+    Study_IDs = paste(sort(unique(Study_ID)), collapse = "; "), .groups = "drop") |>
+  arrange(match(Response_standard, names(figure9_titles)))
+print(figure9_counts, n = Inf, width = Inf)
+print(select(figure9_data, Response_standard, Study_ID, Experiment_ID,
+  Treatment_Arm_ID, Control_Arm_ID, yi, vi, CI_lower, CI_upper), n = Inf, width = Inf)
+
+stopifnot(n_distinct(figure9_data$Response_standard) == 2L,
+  !anyNA(figure9_data$Record_ID), !anyDuplicated(figure9_data$Record_ID),
+  all(is.finite(figure9_data$yi)),
+  all(is.finite(figure9_data$vi) & figure9_data$vi > 0),
+  all(is.finite(figure9_data$CI_lower)), all(is.finite(figure9_data$CI_upper)))
+if (any(figure9_counts$Studies != 2L) ||
+    any(figure9_counts$Effect_sizes != c(4L, 8L))) {
+  warning("The current data differ from the expected 2 studies per response and 4/8 effect sizes. See figure9_counts for the actual counts and study IDs.")
+}
+
+figure9_width <- 11.5
+figure9_height <- 10.8
+```
+
+```{r}
+#| label: fig-figure9-functional-responses
+#| fig-width: 11.5
+#| fig-height: 10.8
+#| fig-align: center
+
+# 2. Show individual comparisons in two panels without fitting models or calculating cross-study pooled statistics --------
+# Keep comparisons from the same study together. Use light backgrounds to distinguish studies and keep square sizes equal.
+draw_figure9 <- function() {
+  # Increase all text by 25% and keep the relative sizes of titles, body text, axes and footnotes.
+  font_scale <- 1.25
+  old_par <- par(no.readonly = TRUE)
+  on.exit(par(old_par), add = TRUE)
+  panel_heights <- vapply(names(figure9_titles), function(response) {
+    sum(figure9_data$Response_standard == response) + 5
+  }, numeric(1))
+  layout(matrix(1:2, ncol = 1), heights = panel_heights)
+  par(oma = c(3.5, 0, 3.1, 0), mar = c(4.3, 1.6, 3.1, 1.6),
+    family = "sans", ps = 12, bg = "white", xpd = NA)
+
+  for (response in names(figure9_titles)) {
+    dat <- filter(figure9_data, Response_standard == response)
+    study_index <- match(dat$Study_ID, unique(dat$Study_ID))
+    rows <- rev(seq_len(nrow(dat))) + max(study_index) - study_index
+    # Each panel's x-axis covers all intervals and 0. alim sets the effect-size range; xlim also leaves space for the text columns on both sides.
+    axis_ticks <- pretty(range(dat$CI_lower, dat$CI_upper, 0), n = 6)
+    axis_limits <- range(axis_ticks)
+    axis_span <- diff(axis_limits)
+    plot_limits <- axis_limits + c(-1.1, 0.55) * axis_span
+    label_x <- plot_limits[1] + 0.03 * axis_span
+    value_x <- plot_limits[2] - 0.03 * axis_span
+
+    metafor::forest(dat$yi, ci.lb = dat$CI_lower, ci.ub = dat$CI_upper,
+      slab = dat$Comparison_label, rows = rows, ylim = c(0, max(rows) + 2.5),
+      xlim = plot_limits, alim = axis_limits, at = axis_ticks,
+      textpos = c(label_x, value_x), annotate = TRUE, xlab = "Hedges' g", refline = 0,
+      header = c("Study / treatment vs control", "Hedges' g [95% CI]"),
+      pch = 15, psize = 1, col = "#287F83", colci = "#4D4D4D",
+      shade = study_index %% 2 == 0, colshade = "#F1F6F6",
+      cex = 0.9 * font_scale, cex.axis = 0.85 * font_scale,
+      cex.lab = 0.95 * font_scale, digits = 2L)
+    title(figure9_titles[[response]], cex.main = 1.1 * font_scale)
+  }
+  mtext("Individual effect estimates for selected biofilm functional responses",
+    side = 3, outer = TRUE, line = 0.9, font = 2, cex = 1.05 * font_scale)
+  mtext(c(
+    "Squares and lines represent individual Hedges' g estimates and 95% confidence intervals.",
+    "Comparisons within studies may share controls; signs indicate numerical changes relative to controls."
+  ), side = 1, outer = TRUE, line = c(0.8, 1.9), cex = 0.75 * font_scale)
+}
+
+draw_figure9()
+```
+
+```{r}
+#| label: figure9-export
+# 3. Export the same two-panel figure: vector PDF and 600 dpi PNG ------------------
+dir.create("outputs", showWarnings = FALSE)
+grDevices::cairo_pdf("outputs/Figure9_Functional_responses.pdf",
+  width = figure9_width, height = figure9_height)
+tryCatch(draw_figure9(), finally = grDevices::dev.off())
+
+grDevices::png("outputs/Figure9_Functional_responses.png",
+  width = figure9_width, height = figure9_height, units = "in", res = 600, type = "cairo")
+tryCatch(draw_figure9(), finally = grDevices::dev.off())
+```
